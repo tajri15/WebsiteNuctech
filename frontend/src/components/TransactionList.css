@@ -1,0 +1,39 @@
+.transaction-container {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+.no-transactions {
+    text-align: center;
+    margin-top: 50px;
+    font-size: 1.2em;
+    color: #888;
+}
+.transaction-card {
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+    animation: fadeIn 0.5s ease-in-out;
+}
+.card-header {
+    background-color: #005A9C;
+    color: white;
+    padding: 10px 15px;
+}
+.card-header h3 {
+    margin: 0;
+    font-size: 1.1em;
+}
+.card-details {
+    padding: 15px;
+    font-size: 0.95em;
+}
+.card-details p {
+    margin: 5px 0;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}

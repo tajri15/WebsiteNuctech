@@ -1,35 +1,39 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import React, { useState, useEffect } from 'react';
+import io from 'socket.io-client';
+import './App.css';
+import TransactionList from './components/TransactionList';
+
+const SOCKET_SERVER_URL = "http://localhost:3001";
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [transactions, setTransactions] = useState([]);
+  const [isConnected, setIsConnected] = useState(false);
+
+  useEffect(() => {
+    const socket = io(SOCKET_SERVER_URL);
+
+    socket.on('connect', () => setIsConnected(true));
+    socket.on('disconnect', () => setIsConnected(false));
+
+    socket.on('new_transaction', (data) => {
+      setTransactions(prev => [data, ...prev.slice(0, 99)]); // Tampilkan 100 transaksi terakhir
+    });
+
+    return () => { socket.disconnect(); };
+  }, []);
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
+    <div className="App">
+      <header className="app-header">
+        <h1>🚢 Real-time Pelabuhan Log Monitor</h1>
+        <p className={`status ${isConnected ? 'connected' : 'disconnected'}`}>
+          Status: {isConnected ? 'Terhubung' : 'Terputus'}
         </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+      </header>
+      <main>
+        <TransactionList transactions={transactions} />
+      </main>
+    </div>
+  );
 }
-
-export default App
+export default App;
