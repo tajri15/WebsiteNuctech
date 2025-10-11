@@ -26,7 +26,7 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 5000;
 
 // GANTI DENGAN PATH ABSOLUT (LENGKAP) KE FILE LOG ANDA!
-const LOG_FILE_PATH = 'C:\\path\\to\\your\\Transmission.log';
+const LOG_FILE_PATH = "C:\Users\ramal\Downloads\Proyek\WebsiteNuctech\server\Transmission.log";
 
 app.use(cors());
 app.use(express.json());
