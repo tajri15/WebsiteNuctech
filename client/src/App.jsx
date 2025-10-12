@@ -154,7 +154,7 @@ function AppContent() {
                     fontSize: '12px' 
                   }}
                 >
-                  Security Solutions
+                  Company Limited
                 </Text>
               </div>
             )}
@@ -254,7 +254,7 @@ function AppContent() {
               }} 
             />
             <Title level={3} style={{ margin: 0, color: '#1890ff' }}>
-              Realtime Container Scanner Dashboard
+              Nuctech Transmission Dashboard Monitoring 
             </Title>
           </div>
         </Header>
@@ -300,7 +300,7 @@ function AppContent() {
               }} 
             />
             <Text style={{ background: 'transparent' }}>
-              Nuctech Scanner Dashboard ©{new Date().getFullYear()} Dibuat oleh Ramadika
+              Nuctech Transmission Dashboard ©{new Date().getFullYear()} Made by Tajri Ramal Muzi
             </Text>
           </div>
         </Footer>
