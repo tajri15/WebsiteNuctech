@@ -9,27 +9,24 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
 } from '@ant-design/icons';
-import 'antd/dist/reset.css'; // Impor CSS Ant Design
+import 'antd/dist/reset.css'; // Penting untuk styling Ant Design
 
-// Impor halaman-halaman (kita akan buat filenya nanti)
+// --- Impor semua komponen halaman ---
 import Overview from './pages/Overview';
-// import DetailLogAll from './pages/DetailLogAll';
-// import DetailLogOk from './pages/DetailLogOk';
-// import DetailLogNok from './pages/DetailLogNok';
-// import Statistics from './pages/Statistics';
-// import Settings from './pages/Settings';
+import DetailLogAll from './pages/DetailLogAll';
+import DetailLogOk from './pages/DetailLogOk';
+import DetailLogNok from './pages/DetailLogNok';
+import Statistics from './pages/Statistics';
+import Settings from './pages/Settings';
 
 const { Header, Content, Footer, Sider } = Layout;
 const { Title } = Typography;
-
-// Komponen placeholder untuk halaman yang belum dibuat
-const Placeholder = ({ title }) => <div><Title level={2}>{title}</Title><p>Halaman ini sedang dalam pengembangan.</p></div>;
 
 function App() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
 
-  // Menentukan menu mana yang aktif berdasarkan URL
+  // Fungsi untuk menentukan menu mana yang aktif berdasarkan URL
   const getSelectedKeys = () => {
     const path = location.pathname;
     if (path === '/') return ['1'];
@@ -38,9 +35,10 @@ function App() {
     if (path.startsWith('/log/nok')) return ['4'];
     if (path.startsWith('/statistics')) return ['5'];
     if (path.startsWith('/settings')) return ['6'];
-    return ['1'];
+    return ['1']; // Default ke Overview
   };
 
+  // Daftar item untuk menu navigasi di samping
   const menuItems = [
     { key: '1', icon: <DesktopOutlined />, label: <Link to="/">Overview</Link> },
     { key: '2', icon: <FileTextOutlined />, label: <Link to="/log/all">Detail Log All</Link> },
@@ -51,38 +49,43 @@ function App() {
   ];
 
   return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Sider collapsible collapsed={collapsed} onCollapse={(value) => setCollapsed(value)}>
-          <div style={{ height: '32px', margin: '16px', background: 'rgba(255, 255, 255, 0.2)', borderRadius: '6px', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'white', fontWeight: 'bold' }}>
-            {collapsed ? 'RSD' : 'Scanner Dashboard'}
+    <Layout style={{ minHeight: '100vh' }}>
+      <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed}>
+        <div style={{
+          height: '32px', margin: '16px', background: 'rgba(255, 255, 255, 0.2)',
+          borderRadius: '6px', display: 'flex', justifyContent: 'center', alignItems: 'center',
+          color: 'white', fontWeight: 'bold', overflow: 'hidden', whiteSpace: 'nowrap'
+        }}>
+          {collapsed ? 'RSD' : 'Scanner Dashboard'}
+        </div>
+        <Menu theme="dark" selectedKeys={getSelectedKeys()} mode="inline" items={menuItems} />
+      </Sider>
+      <Layout>
+        <Header style={{ padding: '0 16px', background: '#ffffff', display: 'flex', alignItems: 'center' }}>
+          <Title level={3} style={{ margin: 0 }}>Realtime Container Scanner Dashboard</Title>
+        </Header>
+        <Content style={{ margin: '16px' }}>
+          <div style={{ padding: 24, minHeight: 'calc(100vh - 180px)', background: '#ffffff', borderRadius: '8px' }}>
+            {/* --- Pengaturan Rute Aplikasi --- */}
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/log/all" element={<DetailLogAll />} />
+              <Route path="/log/ok" element={<DetailLogOk />} />
+              <Route path="/log/nok" element={<DetailLogNok />} />
+              <Route path="/statistics" element={<Statistics />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
           </div>
-          <Menu theme="dark" selectedKeys={getSelectedKeys()} mode="inline" items={menuItems} />
-        </Sider>
-        <Layout>
-          <Header style={{ padding: '0 16px', background: '#ffffff', display: 'flex', alignItems: 'center' }}>
-              <Title level={3} style={{ margin: 0 }}>Realtime Container Scanner Dashboard</Title>
-          </Header>
-          <Content style={{ margin: '16px' }}>
-            <div style={{ padding: 24, minHeight: 'calc(100vh - 180px)', background: '#ffffff', borderRadius: '8px' }}>
-              <Routes>
-                <Route path="/" element={<Overview />} />
-                <Route path="/log/all" element={<Placeholder title="Detail Log All" />} />
-                <Route path="/log/ok" element={<Placeholder title="Detail Log OK" />} />
-                <Route path="/log/nok" element={<Placeholder title="Detail Log NOK" />} />
-                <Route path="/statistics" element={<Placeholder title="Statistics" />} />
-                <Route path="/settings" element={<Placeholder title="Settings" />} />
-              </Routes>
-            </div>
-          </Content>
-          <Footer style={{ textAlign: 'center' }}>
-            Scanner Dashboard ©{new Date().getFullYear()} Created by Ramadika
-          </Footer>
-        </Layout>
+        </Content>
+        <Footer style={{ textAlign: 'center' }}>
+          Scanner Dashboard ©{new Date().getFullYear()} Dibuat oleh Ramadika
+        </Footer>
       </Layout>
+    </Layout>
   );
 }
 
-// Bungkus App dengan Router untuk bisa menggunakan `useLocation`
+// Bungkus komponen App dengan Router agar fitur routing dapat digunakan
 const AppWrapper = () => (
   <Router>
     <App />

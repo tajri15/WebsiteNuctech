@@ -1,37 +1,37 @@
+// --- 1. IMPORT MODUL ---
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const chokidar = require('chokidar');
+const http = require('http');
+const { Server } = require("socket.io");
 const { parseLogLine } = require('./logParser');
 const db = require('./db');
 
-// --> [Socket.IO] Impor modul yang diperlukan
-const http = require('http');
-const { Server } = require("socket.io");
+// --- 2. KONFIGURASI UTAMA ---
+// PENTING: Ganti path di bawah ini sesuai dengan lokasi di komputer Anda.
+const LOG_FILE_PATH = 'C:\\path\\to\\your\\Transmission.log';
+const IMAGE_FOLDER_PATH = 'D:/Image';
+const PORT = process.env.PORT || 5000;
 
+// --- 3. INISIALISASI SERVER ---
 const app = express();
-// --> [Socket.IO] Buat server HTTP dari aplikasi Express
 const server = http.createServer(app);
-
-// --> [Socket.IO] Inisialisasi Socket.IO dan atur CORS
-// Pastikan origin-nya sesuai dengan URL frontend React Anda nanti (Vite default di 5173)
 const io = new Server(server, {
     cors: {
-        origin: ["http://localhost:3000", "http://localhost:5173"], // Izinkan koneksi dari React dev server
+        origin: ["http://localhost:3000", "http://localhost:5173"], // Izinkan koneksi dari React
         methods: ["GET", "POST"]
     }
 });
 
-const PORT = process.env.PORT || 5000;
-
-// GANTI DENGAN PATH ABSOLUT (LENGKAP) KE FILE LOG ANDA!
-const LOG_FILE_PATH = "C:\Users\ramal\Downloads\Proyek\WebsiteNuctech\server\Transmission.log";
-
+// --- 4. MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
+// Middleware untuk menyajikan file gambar dari folder yang ditentukan
+app.use('/images', express.static(IMAGE_FOLDER_PATH));
 
-// --> [Socket.IO] Menangani koneksi dari client
+// --- 5. SOCKET.IO CONNECTION HANDLER ---
 io.on('connection', (socket) => {
     console.log(`🔌 User terhubung: ${socket.id}`);
     socket.on('disconnect', () => {
@@ -39,88 +39,112 @@ io.on('connection', (socket) => {
     });
 });
 
-app.get('/', (req, res) => {
-  res.send('Server is running with real-time capabilities!');
-});
+// --- 6. API ENDPOINTS ---
 
-// API Endpoint untuk mengambil data scan dari database (tidak berubah)
+// Endpoint dasar untuk memeriksa status server
+app.get('/', (req, res) => res.send('Server is running with real-time capabilities!'));
+
+// Endpoint untuk mengambil data log dengan paginasi
 app.get('/api/scans', async (req, res) => {
     try {
-        const { status, limit = 100 } = req.query;
-        let queryText;
-        const queryParams = [limit];
-
-        if (status && status.toLowerCase() === 'ok') {
-            queryText = "SELECT * FROM scans WHERE status = 'OK' ORDER BY scan_time DESC LIMIT $1";
-        } else if (status && status.toLowerCase() === 'nok') {
-            queryText = "SELECT * FROM scans WHERE status = 'NOK' ORDER BY scan_time DESC LIMIT $1";
-        } else {
-            queryText = 'SELECT * FROM scans ORDER BY scan_time DESC LIMIT $1';
-        }
-
-        const result = await db.query(queryText, queryParams);
-        res.json(result.rows);
+        const { status, page = 1, pageSize = 10 } = req.query;
+        const offset = (page - 1) * pageSize;
+        let filterClause = '';
+        if (status && status.toLowerCase() === 'ok') filterClause = "WHERE status = 'OK'";
+        else if (status && status.toLowerCase() === 'nok') filterClause = "WHERE status = 'NOK'";
+        
+        const totalQuery = `SELECT COUNT(*) FROM scans ${filterClause}`;
+        const totalResult = await db.query(totalQuery);
+        const total = parseInt(totalResult.rows[0].count, 10);
+        
+        const dataQuery = `SELECT * FROM scans ${filterClause} ORDER BY scan_time DESC LIMIT $1 OFFSET $2`;
+        const result = await db.query(dataQuery, [pageSize, offset]);
+        
+        res.json({ data: result.rows, total });
     } catch (err) {
         console.error("Error fetching scans from DB:", err.stack);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Log file watcher (pemantau file log)
+// Endpoint untuk mengambil data statistik harian
+app.get('/api/stats/daily', async (req, res) => {
+    try {
+        const queryText = `
+            SELECT DATE(scan_time) as date, COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE status = 'OK') as ok_count,
+                   COUNT(*) FILTER (WHERE status = 'NOK') as nok_count
+            FROM scans GROUP BY DATE(scan_time) ORDER BY date DESC LIMIT 30;`;
+        const result = await db.query(queryText);
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Error fetching daily stats:", err.stack);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Endpoint untuk mengambil konfigurasi server
+app.get('/api/config', (req, res) => {
+    try {
+        res.json({
+            logFilePath: LOG_FILE_PATH,
+            imageFolderPath: IMAGE_FOLDER_PATH,
+            databaseHost: db.pool.options.host,
+            databaseName: db.pool.options.database,
+        });
+    } catch (err) {
+        console.error("Error fetching config:", err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+
+// --- 7. LOG FILE WATCHER ---
 if (!fs.existsSync(LOG_FILE_PATH)) {
-    console.error(`ERROR: File log tidak ditemukan di path: ${LOG_FILE_PATH}`);
+    console.error(`\n[ERROR] File log tidak ditemukan di: ${LOG_FILE_PATH}`);
+    console.error("Pastikan path sudah benar dan server memiliki izin untuk membacanya.\n");
     process.exit(1);
 }
 
-const watcher = chokidar.watch(LOG_FILE_PATH, {
-  persistent: true,
-  usePolling: true,
-});
-console.log(`Memantau perubahan pada file: ${LOG_FILE_PATH}`);
+const watcher = chokidar.watch(LOG_FILE_PATH, { persistent: true, usePolling: true });
+console.log(`\n👀 Memantau perubahan pada file: ${LOG_FILE_PATH}`);
 let lastSize = fs.statSync(LOG_FILE_PATH).size;
 
 watcher.on('change', (path) => {
   fs.stat(path, (err, stats) => {
     if (err) return console.error("Error mendapatkan status file:", err);
-
-    if (stats.size > lastSize) {
-      const stream = fs.createReadStream(path, { start: lastSize, end: stats.size });
-      stream.on('data', (buffer) => {
-        const lines = buffer.toString('utf8').trim().split('\n');
-        lines.forEach(async (line) => {
-          if (!line) return;
-          const parsedData = parseLogLine(line);
-          if (parsedData) {
-            console.log('--- DATA TRANSAKSI BARU ---', parsedData);
-            try {
-              const queryText = `
-                INSERT INTO scans(container_no, truck_no, scan_time, status, image1_path, image2_path, image3_path, image4_path)
-                VALUES($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING *`;
-              const values = [
-                parsedData.containerNo, parsedData.truckNo, parsedData.scanTime, parsedData.status,
-                parsedData.image1_path, parsedData.image2_path, parsedData.image3_path, parsedData.image4_path,
-              ];
-              const res = await db.query(queryText, values);
-              const newScanData = res.rows[0];
-              console.log('Data berhasil disimpan ke DB:', newScanData.id);
-
-              // --> [Socket.IO] Kirim data baru ke semua client yang terhubung!
-              console.log('📡 Mengirim data baru ke client via socket...');
-              io.emit('new_scan', newScanData);
-
-            } catch (dbErr) {
-              console.error('Gagal menyimpan ke DB:', dbErr.stack);
-            }
-          }
-        });
-      });
-      lastSize = stats.size;
+    if (stats.size <= lastSize) {
+      lastSize = stats.size; // Handle log rotation/reset
+      return;
     }
+    
+    const stream = fs.createReadStream(path, { start: lastSize, end: stats.size });
+    stream.on('data', (buffer) => {
+      const lines = buffer.toString('utf8').trim().split('\n');
+      lines.forEach(async (line) => {
+        if (!line) return;
+        const parsedData = parseLogLine(line);
+        if (parsedData) {
+          try {
+            const query = `INSERT INTO scans(container_no, truck_no, scan_time, status, image1_path, image2_path, image3_path, image4_path) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
+            const values = [parsedData.containerNo, parsedData.truckNo, parsedData.scanTime, parsedData.status, parsedData.image1_path, parsedData.image2_path, parsedData.image3_path, parsedData.image4_path];
+            const res = await db.query(query, values);
+            const newScanData = res.rows[0];
+            
+            console.log(`[OK] Data [${newScanData.id}] disimpan. Mengirim via socket...`);
+            io.emit('new_scan', newScanData);
+
+          } catch (dbErr) {
+            console.error('[ERROR] Gagal menyimpan ke DB:', dbErr.stack);
+          }
+        }
+      });
+    });
+    lastSize = stats.size;
   });
 });
 
-// --> [Socket.IO] Jalankan server melalui instance http, bukan app
+// --- 8. START SERVER ---
 server.listen(PORT, () => {
-  console.log(`Server berjalan di http://localhost:${PORT}`);
+  console.log(`🚀 Server berjalan di http://localhost:${PORT}\n`);
 });

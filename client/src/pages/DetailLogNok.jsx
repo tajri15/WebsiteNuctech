@@ -4,13 +4,13 @@ import { Typography } from 'antd';
 
 const { Title } = Typography;
 
-const DetailLogAll = () => {
+const DetailLogNok = () => {
   return (
     <div>
-      <Title level={2}>Detail Log - All Transactions</Title>
-      <DetailLogTable filterStatus="all" />
+      <Title level={2}>Detail Log - NOK Transactions</Title>
+      <DetailLogTable filterStatus="nok" />
     </div>
   );
 };
 
-export default DetailLogAll;
+export default DetailLogNok;
