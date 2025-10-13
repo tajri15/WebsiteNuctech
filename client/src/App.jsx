@@ -300,7 +300,7 @@ function AppContent() {
               }} 
             />
             <Text style={{ background: 'transparent' }}>
-              Nuctech Transmission Dashboard ©{new Date().getFullYear()} Made by Tajri Ramal Muzi
+              Nuctech Transmission Dashboard ©{new Date().getFullYear()} Made by Nuctech Company Limited
             </Text>
           </div>
         </Footer>
