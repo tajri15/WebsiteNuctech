@@ -1,11 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Tag, Modal, Image, Button, Input, Space, Card, Typography, Select, Row, Col } from 'antd';
+import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col } from 'antd';
 import axios from 'axios';
+import io from 'socket.io-client'; // Ditambahkan untuk real-time
 import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
 const { Option } = Select;
+
+// Inisialisasi koneksi socket ke server backend Anda
+const socket = io('http://localhost:5000');
 
 const DetailLogTable = ({ filterStatus }) => {
   const [data, setData] = useState([]);
@@ -49,6 +53,28 @@ const DetailLogTable = ({ filterStatus }) => {
   useEffect(() => {
     fetchData({ current: 1, pageSize: 10 });
   }, [filterStatus, searchText, logType, statusFilter]);
+  
+  // -- BLOK KODE UNTUK REAL-TIME UPDATE --
+  useEffect(() => {
+    const handleNewScan = (newScanData) => {
+      console.log('✅ Data scan baru diterima dari server:', newScanData);
+      // Menambahkan data baru ke baris paling atas tabel
+      setData(prevData => [newScanData, ...prevData]);
+      // Menambah jumlah total data di paginasi
+      setPagination(prevPagination => ({
+        ...prevPagination,
+        total: prevPagination.total + 1,
+      }));
+    };
+
+    // Mulai mendengarkan siaran 'new_scan' dari server
+    socket.on('new_scan', handleNewScan);
+
+    // Berhenti mendengarkan saat komponen ditutup untuk mencegah kebocoran memori
+    return () => {
+      socket.off('new_scan', handleNewScan);
+    };
+  }, []); // Array kosong memastikan ini hanya berjalan sekali
 
   const handleTableChange = (newPagination) => {
     fetchData(newPagination);
@@ -63,7 +89,6 @@ const DetailLogTable = ({ filterStatus }) => {
   };
 
   const handleExport = () => {
-    // Implementasi export functionality
     console.log('Export functionality');
   };
 
@@ -218,9 +243,6 @@ const DetailLogTable = ({ filterStatus }) => {
 
   return (
     <div style={{ padding: '24px' }}>
-
-
-      {/* Filter Section - Layout diperbaiki */}
       <Card 
         style={{ 
           marginBottom: 16,
@@ -229,7 +251,6 @@ const DetailLogTable = ({ filterStatus }) => {
         }}
         styles={{ body: { padding: '16px 24px' } }}
       >
-        {/* Baris 1: Label dan Dropdown */}
         <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 16 }}>
           <Col>
             <Text strong>Pilih Transmission Log:</Text>
@@ -245,7 +266,6 @@ const DetailLogTable = ({ filterStatus }) => {
               <Option value="nok">Log NOK</Option>
             </Select>
           </Col>
-          
           <Col>
             <Text strong>Status:</Text>
           </Col>
@@ -261,8 +281,6 @@ const DetailLogTable = ({ filterStatus }) => {
             </Select>
           </Col>
         </Row>
-
-        {/* Baris 2: Search dan Tombol-tombol */}
         <Row gutter={[16, 16]} align="middle">
           <Col>
             <Text strong>Search:</Text>
@@ -275,7 +293,6 @@ const DetailLogTable = ({ filterStatus }) => {
               style={{ width: '100%', maxWidth: 300 }}
             />
           </Col>
-          
           <Col>
             <Button 
               type="primary" 
@@ -286,7 +303,6 @@ const DetailLogTable = ({ filterStatus }) => {
               Search
             </Button>
           </Col>
-          
           <Col>
             <Button 
               type="default" 
@@ -297,7 +313,6 @@ const DetailLogTable = ({ filterStatus }) => {
               Export Excel
             </Button>
           </Col>
-          
           <Col>
             <Button 
               type="default" 
@@ -310,8 +325,6 @@ const DetailLogTable = ({ filterStatus }) => {
           </Col>
         </Row>
       </Card>
-
-      {/* Table Section */}
       <Card 
         style={{ 
           borderRadius: 8,
@@ -341,8 +354,6 @@ const DetailLogTable = ({ filterStatus }) => {
           }}
         />
       </Card>
-
-      {/* Image Modal */}
       {selectedRecord && (
         <Modal
           title={
@@ -448,7 +459,6 @@ const DetailLogTable = ({ filterStatus }) => {
               )}
             </div>
           </Image.PreviewGroup>
-          
           {!selectedRecord.image1_path && !selectedRecord.image2_path && 
            !selectedRecord.image3_path && !selectedRecord.image4_path && (
             <div style={{ 

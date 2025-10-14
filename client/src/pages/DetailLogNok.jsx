@@ -21,21 +21,6 @@ const DetailLogNok = () => {
         </Text>
       </div>
 
-      {/* Alert Banner */}
-      <Alert
-        message="Attention Required"
-        description="These transactions failed during scanning process and need manual review."
-        type="warning"
-        showIcon
-        icon={<WarningOutlined />}
-        style={{ 
-          marginBottom: 24,
-          borderRadius: 12,
-          border: 'none',
-          background: '#fffbe6'
-        }}
-      />
-
       {/* Status Badge */}
       <Card 
         style={{ 
