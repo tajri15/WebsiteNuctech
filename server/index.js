@@ -95,7 +95,7 @@ app.get('/api/scans', async (req, res) => {
 });
 
 // =======================================================================
-// === PENAMBAHAN API STATISTIK DI SINI ===
+// === API STATISTIK ===
 // =======================================================================
 app.get('/api/stats', async (req, res) => {
     try {
@@ -113,8 +113,101 @@ app.get('/api/stats', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-// =======================================================================
 
+// =======================================================================
+// === API ENDPOINT UNTUK EXPORT CSV (FIXED - RETURN FILENAME IN JSON) ===
+// =======================================================================
+app.get('/api/export/csv-v2', async (req, res) => {
+    try {
+        const { status, search, logType } = req.query;
+
+        console.log('📊 Export CSV v2 requested with params:', { status, search, logType });
+
+        let baseQuery = 'SELECT * FROM scans';
+        let whereClauses = [];
+        let queryParams = [];
+
+        if (status && status !== 'all') {
+            queryParams.push(status);
+            whereClauses.push(`UPPER(status) = UPPER($${queryParams.length})`);
+        } else if (logType && logType !== 'all') {
+            queryParams.push(logType);
+            whereClauses.push(`UPPER(status) = UPPER($${queryParams.length})`);
+        }
+        
+        if (search) {
+            queryParams.push(`%${search}%`);
+            whereClauses.push(`(container_no ILIKE $${queryParams.length} OR id::text ILIKE $${queryParams.length})`);
+        }
+        
+        if (whereClauses.length > 0) {
+            baseQuery += ' WHERE ' + whereClauses.join(' AND ');
+        }
+
+        baseQuery += ' ORDER BY scan_time DESC';
+
+        const result = await db.query(baseQuery, queryParams);
+        const data = result.rows;
+
+        console.log(`📊 Found ${data.length} records for export`);
+
+        // Tentukan jenis log untuk nama file
+        let filename;
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        
+        if (status === 'ok' || logType === 'ok') {
+            filename = `scan_data_ok_${timestamp}.csv`;
+        } else if (status === 'nok' || logType === 'nok') {
+            filename = `scan_data_nok_${timestamp}.csv`;
+        } else {
+            filename = `scan_data_all_${timestamp}.csv`;
+        }
+
+        // Create CSV content
+        const headers = ['NO', 'ID SCAN', 'NO. CONTAINER', 'NO. TRUCK', 'SCAN TIME', 'UPDATE TIME', 'STATUS'];
+        let csvContent = headers.join(',') + '\r\n';
+
+        data.forEach((item, index) => {
+            const row = [
+                index + 1,
+                `"${item.id}"`,
+                `"${item.container_no || '-'}"`,
+                `"${item.truck_no || '-'}"`,
+                `"${item.scan_time ? new Date(item.scan_time).toLocaleString('id-ID') : '-'}"`,
+                `"${item.updated_at ? new Date(item.updated_at).toLocaleString('id-ID') : '-'}"`,
+                `"${item.status || '-'}"`
+            ];
+            csvContent += row.join(',') + '\r\n';
+        });
+
+        // Force download dengan nama yang benar
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csvContent);
+
+        console.log(`✅ CSV v2 export successful: ${filename}`);
+
+    } catch (err) {
+        console.error("❌ Error exporting to CSV v2:", err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// =======================================================================
+// === API UNTUK MENGAMBIL GAMBAR ===
+// =======================================================================
+app.use('/images', express.static(path.join(__dirname, 'images')));
+
+// =======================================================================
+// === API HEALTH CHECK ===
+// =======================================================================
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        message: 'Server is running',
+        timestamp: new Date().toISOString()
+    });
+});
 
 // --- Koneksi WebSocket ---
 io.on('connection', (socket) => {
@@ -122,17 +215,19 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => console.log(`🔌 Pengguna terputus: ${socket.id}`));
 });
 
-// --- SAJIKAN APLIKASI REACT ---
-const clientBuildPath = path.join(__dirname, '../client/build');
-if (fs.existsSync(clientBuildPath)) {
-    app.use(express.static(clientBuildPath));
-    app.get('*', (req, res) => {
-        res.sendFile(path.join(clientBuildPath, 'index.html'));
+// --- SIMPLE CATCH-ALL ROUTE UNTUK REACT APP ---
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'Backend server is running!',
+        instructions: 'Frontend should be running on http://localhost:3000',
+        endpoints: {
+            scans: '/api/scans',
+            stats: '/api/stats',
+            export: '/api/export/csv',
+            health: '/api/health'
+        }
     });
-    console.log('✅ Frontend build ditemukan dan disajikan.');
-} else {
-    console.warn('⚠️ Frontend build (../client/build) tidak ditemukan. Jalankan "npm start" di folder client.');
-}
+});
 
 // --- Log File Watcher ---
 if (!fs.existsSync(LOG_FILE_PATH)) {
@@ -183,6 +278,24 @@ chokidar.watch(LOG_FILE_PATH, { usePolling: true, interval: 500 }).on('change', 
     }
 });
 
+// =======================================================================
+// === ERROR HANDLING MIDDLEWARE ===
+// =======================================================================
+app.use((err, req, res, next) => {
+    console.error('❌ Unhandled Error:', err);
+    res.status(500).json({ 
+        error: 'Internal Server Error',
+        message: err.message 
+    });
+});
+
 server.listen(PORT, () => {
     console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+    console.log(`📊 API Endpoints:`);
+    console.log(`   GET  /api/scans - Mendapatkan data scans`);
+    console.log(`   GET  /api/stats - Mendapatkan statistik`);
+    console.log(`   GET  /api/export/csv - Export data ke CSV`);
+    console.log(`   GET  /api/health - Health check`);
+    console.log(`   WS   / - WebSocket untuk real-time updates`);
+    console.log(`\n📱 Frontend harus dijalankan terpisah di http://localhost:3000`);
 });

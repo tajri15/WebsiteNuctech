@@ -1,13 +1,11 @@
 import React from 'react';
 import DetailLogTable from '../components/DetailLogTable';
-import { Typography, Card, Row, Col, Statistic, Tag, Progress } from 'antd';
-import { CheckCircleOutlined, FileSyncOutlined, RocketOutlined } from '@ant-design/icons';
+import { Typography, Card, Tag } from 'antd';
+import { CheckCircleOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 
 const DetailLogOk = () => {
-  const successRate = 86.7;
-
   return (
     <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
       {/* Header Section */}
@@ -52,7 +50,7 @@ const DetailLogOk = () => {
         </div>
       </Card>
 
-      {/* Main Content */}
+      {/* Main Content - Tanpa prop showTransmissionFilter (default: false) */}
       <Card 
         style={{ 
           borderRadius: 12,

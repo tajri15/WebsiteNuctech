@@ -1,19 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col } from 'antd';
+import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col, message } from 'antd';
 import axios from 'axios';
-import io from 'socket.io-client'; // Ditambahkan untuk real-time
+import io from 'socket.io-client';
 import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
 const { Option } = Select;
 
-// Inisialisasi koneksi socket ke server backend Anda
 const socket = io('http://localhost:5000');
 
-const DetailLogTable = ({ filterStatus }) => {
+const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: 10,
@@ -22,29 +22,46 @@ const DetailLogTable = ({ filterStatus }) => {
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [searchText, setSearchText] = useState('');
-  const [logType, setLogType] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [transmissionFilter, setTransmissionFilter] = useState('all');
+  const [searchInputValue, setSearchInputValue] = useState('');
 
+  // Fungsi fetch data
   const fetchData = async (params = {}) => {
     setLoading(true);
     try {
+      const requestParams = {
+        page: params.current || pagination.current,
+        pageSize: params.pageSize || pagination.pageSize,
+      };
+
+      if (filterStatus && filterStatus !== 'all') {
+        requestParams.status = filterStatus;
+      } else if (showTransmissionFilter && transmissionFilter !== 'all') {
+        requestParams.status = transmissionFilter;
+      }
+
+      if (searchText) {
+        requestParams.search = searchText;
+      }
+
+      console.log('📡 Fetching data with params:', requestParams);
+
       const response = await axios.get('http://localhost:5000/api/scans', {
-        params: {
-          status: filterStatus === 'all' ? undefined : filterStatus,
-          page: params.current,
-          pageSize: params.pageSize,
-          search: searchText || undefined,
-          logType: logType === 'all' ? undefined : logType,
-          statusFilter: statusFilter === 'all' ? undefined : statusFilter,
-        },
+        params: requestParams,
       });
+      
       setData(response.data.data);
       setPagination({
-        ...params,
+        current: params.current || pagination.current,
+        pageSize: params.pageSize || pagination.pageSize,
         total: response.data.total,
       });
+
+      console.log('✅ Data fetched successfully:', response.data.data.length, 'records');
+
     } catch (error) {
-      console.error("Gagal mengambil data log detail:", error);
+      console.error("❌ Gagal mengambil data log detail:", error);
+      message.error('Gagal memuat data');
     } finally {
       setLoading(false);
     }
@@ -52,29 +69,36 @@ const DetailLogTable = ({ filterStatus }) => {
 
   useEffect(() => {
     fetchData({ current: 1, pageSize: 10 });
-  }, [filterStatus, searchText, logType, statusFilter]);
-  
-  // -- BLOK KODE UNTUK REAL-TIME UPDATE --
+  }, [filterStatus, transmissionFilter, searchText]);
+
   useEffect(() => {
     const handleNewScan = (newScanData) => {
       console.log('✅ Data scan baru diterima dari server:', newScanData);
-      // Menambahkan data baru ke baris paling atas tabel
-      setData(prevData => [newScanData, ...prevData]);
-      // Menambah jumlah total data di paginasi
-      setPagination(prevPagination => ({
-        ...prevPagination,
-        total: prevPagination.total + 1,
-      }));
+      
+      let shouldAdd = true;
+      
+      if (filterStatus && filterStatus !== 'all') {
+        shouldAdd = newScanData.status === filterStatus;
+      } else if (showTransmissionFilter && transmissionFilter !== 'all') {
+        shouldAdd = newScanData.status === transmissionFilter;
+      }
+      
+      if (shouldAdd) {
+        setData(prevData => [newScanData, ...prevData]);
+        setPagination(prevPagination => ({
+          ...prevPagination,
+          total: prevPagination.total + 1,
+        }));
+        message.info('Data baru diterima');
+      }
     };
 
-    // Mulai mendengarkan siaran 'new_scan' dari server
     socket.on('new_scan', handleNewScan);
 
-    // Berhenti mendengarkan saat komponen ditutup untuk mencegah kebocoran memori
     return () => {
       socket.off('new_scan', handleNewScan);
     };
-  }, []); // Array kosong memastikan ini hanya berjalan sekali
+  }, [filterStatus, transmissionFilter, showTransmissionFilter]);
 
   const handleTableChange = (newPagination) => {
     fetchData(newPagination);
@@ -82,14 +106,65 @@ const DetailLogTable = ({ filterStatus }) => {
 
   const handleSearch = (value) => {
     setSearchText(value);
+    setSearchInputValue(value);
+  };
+
+  const handleSearchInputChange = (e) => {
+    setSearchInputValue(e.target.value);
   };
 
   const handleRefresh = () => {
     fetchData({ current: 1, pageSize: 10 });
+    message.info('Data diperbarui');
   };
 
-  const handleExport = () => {
-    console.log('Export functionality');
+  // =======================================================================
+  // === FUNGSI EXPORT CSV YANG DIPERBAIKI (FIXED) ===
+  // =======================================================================
+  const handleExport = async () => {
+    try {
+      setExportLoading(true);
+      message.loading('Mempersiapkan export...', 0);
+      
+      const params = new URLSearchParams();
+      
+      if (filterStatus && filterStatus !== 'all') {
+        params.append('status', filterStatus);
+      } else if (showTransmissionFilter && transmissionFilter !== 'all') {
+        params.append('logType', transmissionFilter);
+      }
+      
+      if (searchText) {
+        params.append('search', searchText);
+      }
+
+      // Gunakan endpoint v2
+      const exportUrl = `http://localhost:5000/api/export/csv-v2?${params.toString()}`;
+      
+      // Simple fetch dengan download otomatis
+      const link = document.createElement('a');
+      link.href = exportUrl;
+      link.target = '_blank';
+      link.download = 'temp.csv'; // Browser akan override ini dengan nama dari server
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      message.destroy();
+      message.success('Export berhasil! File sedang didownload.');
+      
+    } catch (error) {
+      console.error('❌ Gagal mengekspor data:', error);
+      message.destroy();
+      message.error('Gagal mengekspor data');
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
+  const handleTransmissionFilterChange = (value) => {
+    setTransmissionFilter(value);
   };
 
   const showImageModal = (record) => {
@@ -251,36 +326,25 @@ const DetailLogTable = ({ filterStatus }) => {
         }}
         styles={{ body: { padding: '16px 24px' } }}
       >
-        <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 16 }}>
-          <Col>
-            <Text strong>Pilih Transmission Log:</Text>
-          </Col>
-          <Col>
-            <Select 
-              value={logType}
-              onChange={setLogType}
-              style={{ width: 150 }}
-            >
-              <Option value="all">All Log Files</Option>
-              <Option value="ok">Log OK</Option>
-              <Option value="nok">Log NOK</Option>
-            </Select>
-          </Col>
-          <Col>
-            <Text strong>Status:</Text>
-          </Col>
-          <Col>
-            <Select 
-              value={statusFilter}
-              onChange={setStatusFilter}
-              style={{ width: 120 }}
-            >
-              <Option value="all">All Status</Option>
-              <Option value="OK">OK</Option>
-              <Option value="NOK">NOK</Option>
-            </Select>
-          </Col>
-        </Row>
+        {showTransmissionFilter && (
+          <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 16 }}>
+            <Col>
+              <Text strong>Pilih Transmission Log:</Text>
+            </Col>
+            <Col>
+              <Select 
+                value={transmissionFilter}
+                onChange={handleTransmissionFilterChange}
+                style={{ width: 150 }}
+              >
+                <Option value="all">All Log Files</Option>
+                <Option value="ok">Log OK</Option>
+                <Option value="nok">Log NOK</Option>
+              </Select>
+            </Col>
+          </Row>
+        )}
+        
         <Row gutter={[16, 16]} align="middle">
           <Col>
             <Text strong>Search:</Text>
@@ -289,6 +353,8 @@ const DetailLogTable = ({ filterStatus }) => {
             <Search
               placeholder="Search container number, ID scan..."
               allowClear
+              value={searchInputValue}
+              onChange={handleSearchInputChange}
               onSearch={handleSearch}
               style={{ width: '100%', maxWidth: 300 }}
             />
@@ -297,7 +363,7 @@ const DetailLogTable = ({ filterStatus }) => {
             <Button 
               type="primary" 
               icon={<SearchOutlined />}
-              onClick={() => fetchData({ current: 1, pageSize: 10 })}
+              onClick={() => handleSearch(searchInputValue)}
               style={{ marginRight: 8 }}
             >
               Search
@@ -308,9 +374,10 @@ const DetailLogTable = ({ filterStatus }) => {
               type="default" 
               icon={<ExportOutlined />}
               onClick={handleExport}
+              loading={exportLoading}
               style={{ marginRight: 8 }}
             >
-              Export Excel
+              Export CSV
             </Button>
           </Col>
           <Col>
@@ -325,6 +392,7 @@ const DetailLogTable = ({ filterStatus }) => {
           </Col>
         </Row>
       </Card>
+      
       <Card 
         style={{ 
           borderRadius: 8,
@@ -354,6 +422,7 @@ const DetailLogTable = ({ filterStatus }) => {
           }}
         />
       </Card>
+      
       {selectedRecord && (
         <Modal
           title={
