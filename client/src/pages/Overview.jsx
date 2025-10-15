@@ -1,19 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import {
   Row, Col, Card, Statistic, Timeline, Typography, Tag, Spin, Alert,
-  Progress, Badge, Descriptions, List, Button
+  Progress, Badge, Descriptions, List, Button, Tooltip, message
 } from 'antd';
 import {
   CheckCircleOutlined, CloseCircleOutlined, CloudServerOutlined,
   DatabaseOutlined, FileTextOutlined, UploadOutlined, ClockCircleOutlined,
   WifiOutlined, SyncOutlined, FileSyncOutlined, ReloadOutlined,
-  FileOutlined, TeamOutlined, CalendarOutlined
+  FileOutlined, TeamOutlined, CalendarOutlined,
+  CloudUploadOutlined, ApiOutlined, RocketOutlined
 } from '@ant-design/icons';
 import io from 'socket.io-client';
 import axios from 'axios';
 
 const { Title, Text } = Typography;
-const socket = io('http://localhost:5000');
 
 const Overview = () => {
   const [loading, setLoading] = useState(true);
@@ -26,19 +26,23 @@ const Overview = () => {
   });
   const [recentScans, setRecentScans] = useState([]);
   const [systemState, setSystemState] = useState({
-    ftpServer1: { 
-      name: 'FTP Server 1', 
-      status: 'standby', 
+    ftpServer: { 
+      name: 'FTP Server', 
+      status: 'connected', 
       lastActivity: '-',
-      details: 'Waiting for activity...',
-      ip: '0.0.0.0'
+      details: 'Monitoring for file uploads',
+      ip: '10.226.62.31',
+      type: 'FTP',
+      currentActivity: 'Monitoring upload'
     },
-    ftpServer2: { 
-      name: 'FTP Server 2', 
+    apiServer: { 
+      name: 'API Server', 
       status: 'standby', 
       lastActivity: '-',
-      details: 'Standby server',
-      ip: '0.0.0.0'
+      details: 'Ready to receive JSON data',
+      ip: '10.226.62.32',
+      type: 'HTTP API',
+      currentActivity: 'Menunggu data JSON'
     }
   });
 
@@ -53,87 +57,252 @@ const Overview = () => {
     successRate: '0%'
   });
 
+  const [realTimeEvents, setRealTimeEvents] = useState([]);
+  const [socket, setSocket] = useState(null);
+
+  // Fungsi untuk fetch data dengan fallback
+  const fetchInitialData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      console.log('🔄 Fetching initial data from server...');
+      
+      const response = await axios.get('http://localhost:5000/api/initial-data');
+      console.log('📦 API Response:', response.data);
+      
+      if (response.data.success) {
+        const { stats, recentScans, systemState, systemActivity } = response.data;
+        
+        // Pastikan data ada sebelum di-set
+        if (stats) {
+          setStats({
+            total: parseInt(stats.total) || 0,
+            ok: parseInt(stats.ok) || 0,
+            nok: parseInt(stats.nok) || 0
+          });
+        }
+        
+        if (recentScans && Array.isArray(recentScans)) {
+          setRecentScans(recentScans);
+        } else {
+          setRecentScans([]);
+        }
+        
+        if (systemState) {
+          setSystemState(prev => ({
+            ftpServer: systemState.ftpServer1 || prev.ftpServer,
+            apiServer: systemState.ftpServer2 || prev.apiServer
+          }));
+        }
+        
+        if (systemActivity) {
+          setSystemActivity(prev => ({
+            ...prev,
+            ...systemActivity
+          }));
+        }
+        
+        console.log('✅ Initial data loaded successfully');
+        
+      } else {
+        throw new Error('Invalid response format: success false');
+      }
+      
+    } catch (err) {
+      console.error("❌ Gagal mengambil data awal:", err);
+      
+      // Fallback: coba ambil data dari endpoint yang ada
+      try {
+        console.log('🔄 Trying fallback endpoints...');
+        const [statsResponse, scansResponse] = await Promise.all([
+          axios.get('http://localhost:5000/api/stats'),
+          axios.get('http://localhost:5000/api/scans?page=1&pageSize=10')
+        ]);
+
+        const fallbackStats = statsResponse.data;
+        const fallbackScans = scansResponse.data.data || [];
+
+        setStats({
+          total: parseInt(fallbackStats.total) || 0,
+          ok: parseInt(fallbackStats.ok) || 0,
+          nok: parseInt(fallbackStats.nok) || 0
+        });
+        setRecentScans(fallbackScans);
+        
+        // Update system activity dengan data real
+        setSystemActivity(prev => ({
+          ...prev,
+          totalScans: parseInt(fallbackStats.total) || 0,
+          successfulScans: parseInt(fallbackStats.ok) || 0,
+          failedScans: parseInt(fallbackStats.nok) || 0,
+          successRate: fallbackStats.total > 0 ? 
+            ((fallbackStats.ok / fallbackStats.total) * 100).toFixed(1) + '%' : '0%',
+          lastUpdate: new Date().toLocaleTimeString('id-ID')
+        }));
+
+        console.log('✅ Fallback data loaded successfully');
+        
+      } catch (fallbackError) {
+        console.error("❌ Fallback juga gagal:", fallbackError);
+        setError("Tidak dapat terhubung ke server. Pastikan server berjalan di http://localhost:5000");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Fungsi untuk refresh data manual
   const handleRefresh = async () => {
     try {
       setRefreshing(true);
-      const response = await axios.get('http://localhost:5000/api/initial-data');
-      const { stats, recentScans, systemState, systemActivity } = response.data;
-      
-      if (stats) setStats(stats);
-      if (recentScans) setRecentScans(recentScans);
-      if (systemState) setSystemState(systemState);
-      if (systemActivity) setSystemActivity(systemActivity);
-      
-      setError(null);
+      await fetchInitialData();
+      message.success('Data diperbarui');
     } catch (err) {
       console.error("Gagal refresh data:", err);
-      setError("Tidak dapat terhubung ke server.");
+      message.error('Gagal memperbarui data');
     } finally {
       setRefreshing(false);
     }
   };
 
-  // Efek untuk mengambil data awal dan setup listener WebSocket
+  // Fungsi untuk mendapatkan warna status
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'connected': return 'green';
+      case 'uploading': return 'blue';
+      case 'processing': return 'orange';
+      case 'standby': return 'default';
+      case 'error': return 'red';
+      default: return 'default';
+    }
+  };
+
+  // Fungsi untuk mendapatkan icon status
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'connected': return <CheckCircleOutlined />;
+      case 'uploading': return <CloudUploadOutlined />;
+      case 'processing': return <SyncOutlined spin />;
+      case 'standby': return <ClockCircleOutlined />;
+      case 'error': return <CloseCircleOutlined />;
+      default: return <ClockCircleOutlined />;
+    }
+  };
+
+  // Setup WebSocket connection
   useEffect(() => {
-    const fetchInitialData = async () => {
-      try {
-        setLoading(true);
-        const response = await axios.get('http://localhost:5000/api/initial-data');
-        const { stats, recentScans, systemState, systemActivity } = response.data;
-        
-        if (stats) setStats(stats);
-        if (recentScans) setRecentScans(recentScans);
-        if (systemState) setSystemState(systemState);
-        if (systemActivity) setSystemActivity(systemActivity);
-        
-        setError(null);
-      } catch (err) {
-        console.error("Gagal mengambil data awal:", err);
-        setError("Tidak dapat terhubung ke server. Pastikan server berjalan.");
-      } finally {
-        setLoading(false);
+    const newSocket = io('http://localhost:5000', {
+      transports: ['websocket', 'polling'],
+      timeout: 10000
+    });
+
+    newSocket.on('connect', () => {
+      console.log('🔌 Connected to WebSocket server');
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('❌ WebSocket connection error:', error);
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      if (newSocket) {
+        newSocket.disconnect();
       }
     };
+  }, []);
 
-    fetchInitialData();
+  // Setup WebSocket listeners setelah socket tersedia
+  useEffect(() => {
+    if (!socket) return;
 
     // Listener untuk update scan baru
     socket.on('new_scan', (data) => {
-      console.log('New scan received:', data);
-      setRecentScans(prev => [data.scan, ...prev.slice(0, 9)]);
+      console.log('📨 New scan received:', data);
+      
+      // Add to real-time events
+      setRealTimeEvents(prev => [{
+        type: 'scan',
+        message: `New scan: ${data.container_no || 'Unknown'} - ${data.status || 'Unknown'}`,
+        timestamp: new Date().toLocaleTimeString('id-ID'),
+        data: data
+      }, ...prev.slice(0, 9)]);
+      
+      setRecentScans(prev => [data, ...prev.slice(0, 9)]);
       setStats(prev => ({
         total: parseInt(prev.total, 10) + 1,
-        ok: prev.ok + (data.scan.status === 'OK' ? 1 : 0),
-        nok: prev.nok + (data.scan.status !== 'OK' ? 1 : 0),
+        ok: prev.ok + (data.status === 'OK' ? 1 : 0),
+        nok: prev.nok + (data.status !== 'OK' ? 1 : 0),
+      }));
+      
+      // Update system activity
+      setSystemActivity(prev => ({
+        ...prev,
+        totalScans: prev.totalScans + 1,
+        successfulScans: prev.successfulScans + (data.status === 'OK' ? 1 : 0),
+        failedScans: prev.failedScans + (data.status !== 'OK' ? 1 : 0),
+        successRate: prev.totalScans + 1 > 0 ? 
+          (((prev.successfulScans + (data.status === 'OK' ? 1 : 0)) / (prev.totalScans + 1)) * 100).toFixed(1) + '%' : '0%',
+        lastUpdate: new Date().toLocaleTimeString('id-ID')
       }));
     });
 
     // Listener untuk update FTP status
     socket.on('ftp_update', (ftpData) => {
-      console.log('FTP update received:', ftpData);
-      setSystemState(prev => ({
-        ...prev,
-        ftpServer1: {
-          ...prev.ftpServer1,
-          status: ftpData.server1.status,
-          lastActivity: ftpData.server1.lastActivity,
-          details: ftpData.server1.details,
-          ip: ftpData.server1.ip
-        },
-        ftpServer2: {
-          ...prev.ftpServer2,
-          status: ftpData.server2.status,
-          lastActivity: ftpData.server2.lastActivity,
-          details: ftpData.server2.details,
-          ip: ftpData.server2.ip
-        }
-      }));
+      console.log('📡 FTP update received:', ftpData);
+      
+      // Add to real-time events
+      setRealTimeEvents(prev => [{
+        type: 'ftp',
+        message: `FTP Server: ${ftpData.ftpServer?.status || 'unknown'} - ${ftpData.ftpServer?.details || 'No details'}`,
+        timestamp: new Date().toLocaleTimeString('id-ID'),
+        data: ftpData
+      }, ...prev.slice(0, 9)]);
+      
+      if (ftpData.ftpServer) {
+        setSystemState(prev => ({
+          ...prev,
+          ftpServer: {
+            ...prev.ftpServer,
+            status: ftpData.ftpServer.status || prev.ftpServer.status,
+            lastActivity: ftpData.ftpServer.lastActivity || prev.ftpServer.lastActivity,
+            details: ftpData.ftpServer.details || prev.ftpServer.details,
+            currentActivity: ftpData.ftpServer.currentActivity || prev.ftpServer.currentActivity
+          }
+        }));
+      }
+    });
+
+    // Listener untuk update API status
+    socket.on('api_update', (apiData) => {
+      console.log('🔗 API update received:', apiData);
+      
+      // Add to real-time events
+      setRealTimeEvents(prev => [{
+        type: 'api',
+        message: `API Server: ${apiData.apiServer?.status || 'unknown'} - ${apiData.apiServer?.details || 'No details'}`,
+        timestamp: new Date().toLocaleTimeString('id-ID'),
+        data: apiData
+      }, ...prev.slice(0, 9)]);
+      
+      if (apiData.apiServer) {
+        setSystemState(prev => ({
+          ...prev,
+          apiServer: {
+            ...prev.apiServer,
+            status: apiData.apiServer.status || prev.apiServer.status,
+            lastActivity: apiData.apiServer.lastActivity || prev.apiServer.lastActivity,
+            details: apiData.apiServer.details || prev.apiServer.details,
+            currentActivity: apiData.apiServer.currentActivity || prev.apiServer.currentActivity
+          }
+        }));
+      }
     });
 
     // Listener untuk update system activity
     socket.on('system_activity_update', (activityData) => {
-      console.log('System activity update:', activityData);
+      console.log('🔄 System activity update:', activityData);
       setSystemActivity(prev => ({
         ...prev,
         ...activityData
@@ -144,28 +313,67 @@ const Overview = () => {
     return () => {
       socket.off('new_scan');
       socket.off('ftp_update');
+      socket.off('api_update');
       socket.off('system_activity_update');
     };
+  }, [socket]);
+
+  // Fetch initial data pada mount
+  useEffect(() => {
+    fetchInitialData();
   }, []);
 
   if (loading) {
-    return <div style={{ textAlign: 'center', marginTop: '50px' }}><Spin size="large" /></div>;
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        minHeight: '50vh',
+        flexDirection: 'column'
+      }}>
+        <Spin size="large" />
+        <div style={{ marginTop: 16 }}>
+          <Text type="secondary">Memuat data overview...</Text>
+        </div>
+      </div>
+    );
   }
 
   if (error) {
-    return <Alert message="Error" description={error} type="error" showIcon style={{ margin: 24 }} />;
+    return (
+      <div style={{ padding: '24px' }}>
+        <Alert 
+          message="Connection Error" 
+          description={error} 
+          type="error" 
+          showIcon 
+          action={
+            <Button size="small" onClick={handleRefresh}>
+              Try Again
+            </Button>
+          }
+        />
+        <div style={{ marginTop: 16, textAlign: 'center' }}>
+          <Button type="primary" onClick={handleRefresh}>
+            <ReloadOutlined /> Refresh
+          </Button>
+        </div>
+      </div>
+    );
   }
   
   const okPercentage = stats.total > 0 ? ((stats.ok / stats.total) * 100).toFixed(1) : '0.0';
-  const ftpServers = [systemState.ftpServer1, systemState.ftpServer2];
 
   return (
     <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
       {/* Header dengan tombol refresh */}
       <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <Title level={2} style={{ margin: 0, color: '#1890ff' }}>Server Activity Overview</Title>
-          <Text type="secondary">Real-time monitoring of transmission logs and system activity.</Text>
+          <Title level={2} style={{ margin: 0, color: '#1890ff' }}>
+            <RocketOutlined /> System Overview
+          </Title>
+          <Text type="secondary">Real-time monitoring of transmission system and scan activities</Text>
         </div>
         <Button 
           type="primary" 
@@ -181,146 +389,239 @@ const Overview = () => {
         {/* Main Content Column */}
         <Col xs={24} lg={16}>
           <Row gutter={[24, 24]}>
-            {/* Transmission Server Status */}
+            {/* Server Status */}
             <Col xs={24}>
               <Card 
                 title={
                   <div style={{ display: 'flex', alignItems: 'center' }}>
                     <CloudServerOutlined style={{ marginRight: 8 }} />
-                    <span>Transmission Server Status</span>
+                    <span>Server Status - Real Time</span>
                   </div>
                 }
                 style={{ borderRadius: 8 }}
+                extra={
+                  <Tag color="green" icon={<CheckCircleOutlined />}>
+                    System Online
+                  </Tag>
+                }
               >
                 <div style={{ marginBottom: 16 }}>
-                  <Text strong>Monitoring transmission logs in real-time with proactive health checks.</Text>
+                  <Text strong>Real-time monitoring of FTP and API server activities</Text>
                 </div>
                 
                 <Row gutter={[24, 16]}>
-                  {/* FTP Connectivity */}
-                  <Col xs={24}>
+                  {/* FTP Server */}
+                  <Col xs={24} md={12}>
                     <Card 
+                      size="small"
                       title={
                         <div style={{ display: 'flex', alignItems: 'center' }}>
-                          <WifiOutlined style={{ marginRight: 8 }} />
-                          <span>FTP Connectivity</span>
+                          <CloudUploadOutlined style={{ marginRight: 8, color: '#1890ff' }} />
+                          <span>FTP Server</span>
                         </div>
-                      } 
-                      style={{ borderRadius: 6 }}
+                      }
+                      style={{ 
+                        border: '1px solid #1890ff',
+                        background: '#f0f8ff'
+                      }}
                     >
-                      <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
-                        Real-time FTP connection monitoring
-                      </Text>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <Text strong style={{ fontSize: '16px' }}>{systemState.ftpServer.name}</Text>
+                        <Tag 
+                          color={getStatusColor(systemState.ftpServer.status)}
+                          icon={getStatusIcon(systemState.ftpServer.status)}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          {systemState.ftpServer.status.toUpperCase()}
+                        </Tag>
+                      </div>
                       
-                      <Row gutter={[16, 16]}>
-                        {ftpServers.map((server, index) => (
-                          <Col xs={24} md={12} key={index}>
-                            <div 
-                              style={{ 
-                                padding: 16, 
-                                background: '#f8f9fa', 
-                                borderRadius: 6,
-                                border: '1px solid #e8e8e8',
-                                height: '100%'
-                              }}
-                            >
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                <Text strong style={{ fontSize: '16px' }}>{server.name}</Text>
-                                <Tag 
-                                  color={
-                                    server.status === 'connected' ? 'green' : 
-                                    server.status === 'uploading' ? 'blue' : 
-                                    server.status === 'standby' ? 'orange' :
-                                    server.status === 'error' ? 'red' : 'default'
-                                  }
-                                  icon={
-                                    server.status === 'connected' || server.status === 'uploading' ? 
-                                    <CheckCircleOutlined /> : 
-                                    server.status === 'standby' ? <ClockCircleOutlined /> :
-                                    <CloseCircleOutlined />
-                                  }
-                                  style={{ fontSize: '12px', padding: '4px 8px' }}
-                                >
-                                  {server.status.toUpperCase()}
-                                </Tag>
-                              </div>
-                              
-                              <div style={{ marginBottom: 8 }}>
-                                <Text style={{ fontSize: '14px', fontWeight: 'bold', color: '#1890ff', fontFamily: 'monospace' }}>
-                                  {server.ip || '0.0.0.0'}
-                                </Text>
-                              </div>
-                              
-                              <div>
-                                <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>
-                                  {server.details}
-                                </Text>
-                                <Text type="secondary" style={{ fontSize: '11px', display: 'block', marginTop: 4 }}>
-                                  <ClockCircleOutlined /> Last: {server.lastActivity}
-                                </Text>
-                              </div>
-                            </div>
-                          </Col>
-                        ))}
-                      </Row>
+                      <div style={{ marginBottom: 8 }}>
+                        <Text style={{ fontSize: '14px', fontWeight: 'bold', color: '#1890ff', fontFamily: 'monospace' }}>
+                          {systemState.ftpServer.ip}
+                        </Text>
+                      </div>
+                      
+                      <div style={{ marginBottom: 8 }}>
+                        <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>
+                          {systemState.ftpServer.details}
+                        </Text>
+                      </div>
+                      
+                      <div>
+                        <Text strong style={{ fontSize: '12px', display: 'block', color: '#666' }}>
+                          Current Activity:
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: '11px', display: 'block', fontStyle: 'italic' }}>
+                          {systemState.ftpServer.currentActivity}
+                        </Text>
+                      </div>
+                      
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary" style={{ fontSize: '11px', display: 'block' }}>
+                          <ClockCircleOutlined /> Last: {systemState.ftpServer.lastActivity}
+                        </Text>
+                      </div>
+                    </Card>
+                  </Col>
+
+                  {/* API Server */}
+                  <Col xs={24} md={12}>
+                    <Card 
+                      size="small"
+                      title={
+                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                          <ApiOutlined style={{ marginRight: 8, color: '#52c41a' }} />
+                          <span>API Server</span>
+                        </div>
+                      }
+                      style={{ 
+                        border: '1px solid #52c41a',
+                        background: '#f6ffed'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <Text strong style={{ fontSize: '16px' }}>{systemState.apiServer.name}</Text>
+                        <Tag 
+                          color={getStatusColor(systemState.apiServer.status)}
+                          icon={getStatusIcon(systemState.apiServer.status)}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          {systemState.apiServer.status.toUpperCase()}
+                        </Tag>
+                      </div>
+                      
+                      <div style={{ marginBottom: 8 }}>
+                        <Text style={{ fontSize: '14px', fontWeight: 'bold', color: '#52c41a', fontFamily: 'monospace' }}>
+                          {systemState.apiServer.ip}
+                        </Text>
+                      </div>
+                      
+                      <div style={{ marginBottom: 8 }}>
+                        <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>
+                          {systemState.apiServer.details}
+                        </Text>
+                      </div>
+                      
+                      <div>
+                        <Text strong style={{ fontSize: '12px', display: 'block', color: '#666' }}>
+                          Current Activity:
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: '11px', display: 'block', fontStyle: 'italic' }}>
+                          {systemState.apiServer.currentActivity}
+                        </Text>
+                      </div>
+                      
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary" style={{ fontSize: '11px', display: 'block' }}>
+                          <ClockCircleOutlined /> Last: {systemState.apiServer.lastActivity}
+                        </Text>
+                      </div>
                     </Card>
                   </Col>
                 </Row>
               </Card>
             </Col>
             
-            {/* Recent Activity */}
+            {/* Recent Activity & Real-time Events */}
             <Col xs={24}>
-              <Card 
-                title={
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span>Recent Scan Activity</span>
-                    <Badge count={recentScans.length} showZero color='#1890ff' />
-                  </div>
-                } 
-                style={{ borderRadius: 8 }}
-                bodyStyle={{ padding: 0 }}
-              >
-                <List
-                  dataSource={recentScans}
-                  renderItem={(scan) => (
-                    <List.Item
-                      style={{
-                        padding: '12px 24px',
-                        borderBottom: '1px solid #f0f0f0',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
-                      }}
-                    >
-                      <div style={{ flex: 1 }}>
-                        <Text strong style={{ display: 'block', fontSize: '14px' }}>
-                          Container: {scan.container_no}
-                        </Text>
-                        <Text type="secondary" style={{ fontSize: '12px' }}>
-                          Truck: {scan.truck_no || 'N/A'}
-                        </Text>
-                        <Text type="secondary" style={{ fontSize: '11px', display: 'block', marginTop: 4 }}>
-                          <CalendarOutlined /> {new Date(scan.scan_time).toLocaleString()}
-                        </Text>
+              <Row gutter={[16, 16]}>
+                {/* Recent Scan Activity */}
+                <Col xs={24} md={12}>
+                  <Card 
+                    title={
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Recent Scan Activity</span>
+                        <Badge count={recentScans.length} showZero color='#1890ff' />
                       </div>
-                      <div style={{ textAlign: 'right' }}>
-                        <Tag 
-                          color={scan.status === 'OK' ? 'green' : 'red'}
-                          style={{ fontSize: '12px', marginBottom: 4 }}
+                    } 
+                    style={{ borderRadius: 8, height: '100%' }}
+                    bodyStyle={{ padding: 0 }}
+                  >
+                    <List
+                      dataSource={recentScans}
+                      renderItem={(scan) => (
+                        <List.Item
+                          style={{
+                            padding: '12px 16px',
+                            borderBottom: '1px solid #f0f0f0',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
+                          }}
                         >
-                          {scan.status}
-                        </Tag>
-                        <br />
-                        <Text type="secondary" style={{ fontSize: '10px' }}>
-                          ID: {scan.id}
-                        </Text>
+                          <div style={{ flex: 1 }}>
+                            <Text strong style={{ display: 'block', fontSize: '14px' }}>
+                              Container: {scan.container_no || 'N/A'}
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: '12px' }}>
+                              Truck: {scan.truck_no || 'N/A'}
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: '11px', display: 'block', marginTop: 4 }}>
+                              <CalendarOutlined /> {scan.scan_time ? new Date(scan.scan_time).toLocaleString() : 'Unknown date'}
+                            </Text>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <Tag 
+                              color={scan.status === 'OK' ? 'green' : 'red'}
+                              style={{ fontSize: '12px', marginBottom: 4 }}
+                            >
+                              {scan.status || 'UNKNOWN'}
+                            </Tag>
+                            <br />
+                            <Text type="secondary" style={{ fontSize: '10px' }}>
+                              ID: {scan.id || 'N/A'}
+                            </Text>
+                          </div>
+                        </List.Item>
+                      )}
+                      locale={{ emptyText: 'No scan activity yet' }}
+                    />
+                  </Card>
+                </Col>
+
+                {/* Real-time Events */}
+                <Col xs={24} md={12}>
+                  <Card 
+                    title={
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Real-time Events</span>
+                        <Badge count={realTimeEvents.length} showZero color='#52c41a' />
                       </div>
-                    </List.Item>
-                  )}
-                  locale={{ emptyText: 'No scan activity yet' }}
-                />
-              </Card>
+                    } 
+                    style={{ borderRadius: 8, height: '100%' }}
+                    bodyStyle={{ padding: 0 }}
+                  >
+                    <List
+                      dataSource={realTimeEvents}
+                      renderItem={(event, index) => (
+                        <List.Item
+                          style={{
+                            padding: '10px 16px',
+                            borderBottom: '1px solid #f0f0f0',
+                            background: index === 0 ? '#f6ffed' : 'transparent'
+                          }}
+                        >
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
+                              {event.type === 'scan' && <DatabaseOutlined style={{ color: '#1890ff', marginRight: 8 }} />}
+                              {event.type === 'ftp' && <CloudUploadOutlined style={{ color: '#1890ff', marginRight: 8 }} />}
+                              {event.type === 'api' && <ApiOutlined style={{ color: '#52c41a', marginRight: 8 }} />}
+                              <Text style={{ fontSize: '13px', fontWeight: 'bold' }}>
+                                {event.message}
+                              </Text>
+                            </div>
+                            <Text type="secondary" style={{ fontSize: '11px', display: 'block' }}>
+                              <ClockCircleOutlined /> {event.timestamp}
+                            </Text>
+                          </div>
+                        </List.Item>
+                      )}
+                      locale={{ emptyText: 'No real-time events yet' }}
+                    />
+                  </Card>
+                </Col>
+              </Row>
             </Col>
           </Row>
         </Col>
@@ -383,7 +684,7 @@ const Overview = () => {
                 <div style={{ textAlign: 'center', padding: 12, background: '#f0f8ff', borderRadius: 6 }}>
                   <Statistic
                     title="SUCCESS RATE"
-                    value={systemActivity.successRate || okPercentage}
+                    value={parseFloat(systemActivity.successRate) || parseFloat(okPercentage)}
                     suffix="%"
                     valueStyle={{ color: '#1890ff', fontSize: 28 }}
                   />

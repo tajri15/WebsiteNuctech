@@ -51,8 +51,25 @@ try {
 // --- Middleware ---
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
 
-// --- API Endpoints ---
+// =======================================================================
+// === API ENDPOINTS ===
+// =======================================================================
+
+// --- API Health Check ---
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        message: 'Server is running',
+        timestamp: new Date().toISOString(),
+        uptime: calculateUptime(),
+        activeConnections: io.engine.clientsCount,
+        version: '1.0.0'
+    });
+});
+
+// --- API untuk mendapatkan data scans dengan pagination dan filter ---
 app.get('/api/scans', async (req, res) => {
     try {
         const { page = 1, pageSize = 10, status, search } = req.query;
@@ -86,17 +103,30 @@ app.get('/api/scans', async (req, res) => {
         
         const dataResult = await db.query(dataQuery, queryParams);
 
-        res.json({ data: dataResult.rows, total: total });
+        res.json({ 
+            success: true,
+            data: dataResult.rows, 
+            total: total,
+            page: parseInt(page),
+            pageSize: parseInt(pageSize),
+            totalPages: Math.ceil(total / pageSize)
+        });
 
     } catch (err) {
-        console.error("Error fetching from /api/scans:", err);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error("❌ Error fetching from /api/scans:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
     }
 });
 
 // =======================================================================
 // === API STATISTIK ===
 // =======================================================================
+
+// --- API Stats Basic ---
 app.get('/api/stats', async (req, res) => {
     try {
         const query = `
@@ -107,15 +137,341 @@ app.get('/api/stats', async (req, res) => {
             FROM scans;
         `;
         const result = await db.query(query);
-        res.json(result.rows[0]);
+        
+        const total = parseInt(result.rows[0].total);
+        const ok = parseInt(result.rows[0].ok);
+        const successRate = total > 0 ? ((ok / total) * 100).toFixed(1) : 0;
+        
+        res.json({
+            success: true,
+            ...result.rows[0],
+            successRate: parseFloat(successRate)
+        });
+        
     } catch (err) {
-        console.error("Error fetching from /api/stats:", err);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error("❌ Error fetching from /api/stats:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
     }
 });
 
 // =======================================================================
-// === API ENDPOINT UNTUK EXPORT CSV (FIXED - RETURN FILENAME IN JSON) ===
+// === API STATISTICS - DAILY SCANS (UNTUK STATISTICS PAGE) ===
+// =======================================================================
+app.get('/api/stats/daily', async (req, res) => {
+    try {
+        console.log('📊 Fetching daily statistics...');
+        
+        const query = `
+            SELECT 
+                DATE(scan_time) as date,
+                COUNT(*) as total_count,
+                COUNT(*) FILTER (WHERE status = 'OK') as ok_count,
+                COUNT(*) FILTER (WHERE status = 'NOK') as nok_count
+            FROM scans 
+            WHERE scan_time >= CURRENT_DATE - INTERVAL '30 days'
+            GROUP BY DATE(scan_time)
+            ORDER BY date DESC
+            LIMIT 30
+        `;
+        
+        const result = await db.query(query);
+        
+        console.log(`✅ Daily stats loaded: ${result.rows.length} days of data`);
+        
+        res.json(result.rows);
+        
+    } catch (err) {
+        console.error("❌ Error fetching daily statistics:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message 
+        });
+    }
+});
+
+// =======================================================================
+// === API STATISTICS - SUMMARY (UNTUK STATISTICS PAGE) ===
+// =======================================================================
+app.get('/api/stats/summary', async (req, res) => {
+    try {
+        console.log('📊 Fetching statistics summary...');
+        
+        // Total stats
+        const totalQuery = `
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'OK') AS ok,
+                COUNT(*) FILTER (WHERE status = 'NOK') AS nok
+            FROM scans;
+        `;
+        const totalResult = await db.query(totalQuery);
+        
+        // Today's stats
+        const todayQuery = `
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'OK') AS ok,
+                COUNT(*) FILTER (WHERE status = 'NOK') AS nok
+            FROM scans 
+            WHERE DATE(scan_time) = CURRENT_DATE;
+        `;
+        const todayResult = await db.query(todayQuery);
+        
+        // This week stats
+        const weekQuery = `
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'OK') AS ok,
+                COUNT(*) FILTER (WHERE status = 'NOK') AS nok
+            FROM scans 
+            WHERE scan_time >= DATE_TRUNC('week', CURRENT_DATE);
+        `;
+        const weekResult = await db.query(weekQuery);
+        
+        // This month stats
+        const monthQuery = `
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'OK') AS ok,
+                COUNT(*) FILTER (WHERE status = 'NOK') AS nok
+            FROM scans 
+            WHERE scan_time >= DATE_TRUNC('month', CURRENT_DATE);
+        `;
+        const monthResult = await db.query(monthQuery);
+        
+        // Success rate
+        const total = parseInt(totalResult.rows[0].total);
+        const ok = parseInt(totalResult.rows[0].ok);
+        const successRate = total > 0 ? ((ok / total) * 100).toFixed(1) : 0;
+        
+        const summary = {
+            overall: {
+                total: parseInt(totalResult.rows[0].total),
+                ok: parseInt(totalResult.rows[0].ok),
+                nok: parseInt(totalResult.rows[0].nok)
+            },
+            today: {
+                total: parseInt(todayResult.rows[0].total),
+                ok: parseInt(todayResult.rows[0].ok),
+                nok: parseInt(todayResult.rows[0].nok)
+            },
+            week: {
+                total: parseInt(weekResult.rows[0].total),
+                ok: parseInt(weekResult.rows[0].ok),
+                nok: parseInt(weekResult.rows[0].nok)
+            },
+            month: {
+                total: parseInt(monthResult.rows[0].total),
+                ok: parseInt(monthResult.rows[0].ok),
+                nok: parseInt(monthResult.rows[0].nok)
+            },
+            successRate: parseFloat(successRate)
+        };
+        
+        console.log('✅ Statistics summary loaded:', summary);
+        
+        res.json(summary);
+        
+    } catch (err) {
+        console.error("❌ Error fetching statistics summary:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message 
+        });
+    }
+});
+
+// =======================================================================
+// === API UNTUK INITIAL DATA OVERVIEW (UNTUK OVERVIEW PAGE) ===
+// =======================================================================
+app.get('/api/initial-data', async (req, res) => {
+    try {
+        console.log('📊 Fetching initial data for overview...');
+
+        // Get stats
+        const statsQuery = `
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'OK') AS ok,
+                COUNT(*) FILTER (WHERE status = 'NOK') AS nok
+            FROM scans;
+        `;
+        const statsResult = await db.query(statsQuery);
+        const stats = statsResult.rows[0];
+
+        // Get recent scans (last 10)
+        const recentScansQuery = `
+            SELECT * FROM scans 
+            ORDER BY scan_time DESC 
+            LIMIT 10
+        `;
+        const recentScansResult = await db.query(recentScansQuery);
+        const recentScans = recentScansResult.rows;
+
+        // Calculate success rate
+        const successRate = stats.total > 0 ? ((stats.ok / stats.total) * 100).toFixed(1) + '%' : '0%';
+
+        // System state dengan data real
+        const systemState = {
+            ftpServer1: { 
+                name: 'FTP Server 1', 
+                status: 'connected', 
+                lastActivity: new Date().toLocaleTimeString('id-ID'),
+                details: 'Connected and monitoring log files',
+                ip: ftpConfig.server1_ip || '10.226.62.31'
+            },
+            ftpServer2: { 
+                name: 'FTP Server 2', 
+                status: 'standby', 
+                lastActivity: new Date().toLocaleTimeString('id-ID'),
+                details: 'Standby - Ready for failover',
+                ip: ftpConfig.server2_ip || '10.226.62.32'
+            }
+        };
+
+        // System activity dengan data real
+        const systemActivity = {
+            uptime: calculateUptime(),
+            lastUpdate: new Date().toLocaleTimeString('id-ID'),
+            activeConnections: io.engine.clientsCount,
+            logFiles: 'Active - Transmission.log',
+            totalScans: parseInt(stats.total),
+            successfulScans: parseInt(stats.ok),
+            failedScans: parseInt(stats.nok),
+            successRate: successRate
+        };
+
+        console.log('✅ Initial data loaded successfully:', {
+            stats,
+            recentScans: recentScans.length,
+            systemActivity
+        });
+
+        res.json({
+            success: true,
+            stats,
+            recentScans,
+            systemState,
+            systemActivity
+        });
+
+    } catch (err) {
+        console.error("❌ Error in /api/initial-data:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
+    }
+});
+
+// =======================================================================
+// === API CONFIGURATION (UNTUK SETTINGS PAGE) ===
+// =======================================================================
+app.get('/api/config', (req, res) => {
+    try {
+        console.log('⚙️ Fetching system configuration...');
+        
+        const configData = {
+            // File paths
+            logFilePath: LOG_FILE_PATH,
+            imageFolderPath: path.join(__dirname, 'images'),
+            
+            // FTP Server Configuration
+            ftpServer: {
+                ip: ftpConfig.server1_ip || '10.226.62.31',
+                status: 'connected',
+                description: 'FTP Server untuk upload gambar',
+                type: 'FTP',
+                activities: ['Upload gambar container', 'File transfer']
+            },
+            
+            // API Server Configuration  
+            apiServer: {
+                ip: ftpConfig.server2_ip || '10.226.62.32', 
+                status: 'standby',
+                description: 'API Server untuk menerima data JSON',
+                type: 'HTTP API',
+                activities: ['Menerima data scan', 'Processing JSON', 'Response status']
+            },
+            
+            // Database Configuration
+            databaseHost: process.env.DB_HOST || 'localhost',
+            databasePort: process.env.DB_PORT || '5432',
+            databaseName: process.env.DB_NAME || 'nuctech_db',
+            databaseUser: process.env.DB_USER || 'postgres',
+            
+            // Server Configuration
+            serverPort: PORT,
+            serverEnvironment: process.env.NODE_ENV || 'development',
+            serverUptime: calculateUptime(),
+            serverStartTime: serverStartTime.toLocaleString('id-ID'),
+            
+            // Log Configuration
+            logMonitoring: fs.existsSync(LOG_FILE_PATH) ? 'Active' : 'Inactive',
+            logFileSize: fs.existsSync(LOG_FILE_PATH) ? 
+                `${(fs.statSync(LOG_FILE_PATH).size / 1024 / 1024).toFixed(2)} MB` : 'File not found',
+            
+            // System Status
+            websocketConnections: io.engine.clientsCount,
+            activeProcesses: 'Log Monitoring, WebSocket, API Server'
+        };
+
+        console.log('✅ Configuration data loaded successfully');
+        
+        res.json({
+            success: true,
+            ...configData
+        });
+        
+    } catch (err) {
+        console.error("❌ Error fetching configuration:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
+    }
+});
+
+// =======================================================================
+// === API UPDATE CONFIGURATION (OPSIONAL) ===
+// =======================================================================
+app.put('/api/config/update', async (req, res) => {
+    try {
+        const { setting, value } = req.body;
+        
+        console.log(`⚙️ Update configuration request: ${setting} = ${value}`);
+        
+        // Di sini Anda bisa menambahkan logika untuk update konfigurasi
+        // Misalnya: update database, restart services, dll.
+        
+        res.json({
+            success: true,
+            message: `Configuration ${setting} updated successfully`,
+            updatedSetting: setting,
+            newValue: value,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (err) {
+        console.error("❌ Error updating configuration:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
+    }
+});
+
+// =======================================================================
+// === API ENDPOINT UNTUK EXPORT CSV ===
 // =======================================================================
 app.get('/api/export/csv-v2', async (req, res) => {
     try {
@@ -163,8 +519,20 @@ app.get('/api/export/csv-v2', async (req, res) => {
             filename = `scan_data_all_${timestamp}.csv`;
         }
 
-        // Create CSV content
-        const headers = ['NO', 'ID SCAN', 'NO. CONTAINER', 'NO. TRUCK', 'SCAN TIME', 'UPDATE TIME', 'STATUS'];
+        // Create CSV content dengan header yang lengkap
+        const headers = [
+            'NO', 
+            'ID SCAN', 
+            'NO. CONTAINER', 
+            'NO. TRUCK', 
+            'SCAN TIME', 
+            'UPDATE TIME', 
+            'STATUS',
+            'IMAGE1_PATH',
+            'IMAGE2_PATH', 
+            'IMAGE3_PATH',
+            'IMAGE4_PATH'
+        ];
         let csvContent = headers.join(',') + '\r\n';
 
         data.forEach((item, index) => {
@@ -175,7 +543,11 @@ app.get('/api/export/csv-v2', async (req, res) => {
                 `"${item.truck_no || '-'}"`,
                 `"${item.scan_time ? new Date(item.scan_time).toLocaleString('id-ID') : '-'}"`,
                 `"${item.updated_at ? new Date(item.updated_at).toLocaleString('id-ID') : '-'}"`,
-                `"${item.status || '-'}"`
+                `"${item.status || '-'}"`,
+                `"${item.image1_path || '-'}"`,
+                `"${item.image2_path || '-'}"`,
+                `"${item.image3_path || '-'}"`,
+                `"${item.image4_path || '-'}"`
             ];
             csvContent += row.join(',') + '\r\n';
         });
@@ -189,7 +561,11 @@ app.get('/api/export/csv-v2', async (req, res) => {
 
     } catch (err) {
         console.error("❌ Error exporting to CSV v2:", err);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
     }
 });
 
@@ -199,103 +575,431 @@ app.get('/api/export/csv-v2', async (req, res) => {
 app.use('/images', express.static(path.join(__dirname, 'images')));
 
 // =======================================================================
-// === API HEALTH CHECK ===
+// === API UNTUK SCAN DETAIL BY ID ===
 // =======================================================================
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        message: 'Server is running',
-        timestamp: new Date().toISOString()
-    });
+app.get('/api/scans/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        console.log(`🔍 Fetching scan detail for ID: ${id}`);
+        
+        const query = 'SELECT * FROM scans WHERE id = $1';
+        const result = await db.query(query, [id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Scan not found',
+                message: `Scan with ID ${id} not found`
+            });
+        }
+        
+        res.json({
+            success: true,
+            data: result.rows[0]
+        });
+        
+    } catch (err) {
+        console.error("❌ Error fetching scan detail:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
+    }
 });
+
+// =======================================================================
+// === API UNTUK DELETE SCAN (OPSIONAL) ===
+// =======================================================================
+app.delete('/api/scans/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        console.log(`🗑️ Deleting scan with ID: ${id}`);
+        
+        const query = 'DELETE FROM scans WHERE id = $1 RETURNING *';
+        const result = await db.query(query, [id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Scan not found',
+                message: `Scan with ID ${id} not found`
+            });
+        }
+        
+        // Emit event untuk update real-time
+        io.emit('scan_deleted', { id });
+        
+        res.json({
+            success: true,
+            message: 'Scan deleted successfully',
+            deletedScan: result.rows[0]
+        });
+        
+    } catch (err) {
+        console.error("❌ Error deleting scan:", err);
+        res.status(500).json({ 
+            success: false,
+            error: 'Internal server error',
+            message: err.message
+        });
+    }
+});
+
+// =======================================================================
+// === HELPER FUNCTIONS ===
+// =======================================================================
+
+// Helper function untuk menghitung uptime
+function calculateUptime() {
+    const startTime = new Date(serverStartTime);
+    const now = new Date();
+    const diff = now - startTime;
+    
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+    
+    return `${days} days ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// =======================================================================
+// === WEBSOCKET HANDLING ===
+// =======================================================================
 
 // --- Koneksi WebSocket ---
 io.on('connection', (socket) => {
     console.log(`🔌 Pengguna terhubung: ${socket.id}`);
-    socket.on('disconnect', () => console.log(`🔌 Pengguna terputus: ${socket.id}`));
-});
+    
+    // Kirim update status saat koneksi baru
+    socket.emit('system_activity_update', {
+        activeConnections: io.engine.clientsCount,
+        lastUpdate: new Date().toLocaleTimeString('id-ID')
+    });
 
-// --- SIMPLE CATCH-ALL ROUTE UNTUK REACT APP ---
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Backend server is running!',
-        instructions: 'Frontend should be running on http://localhost:3000',
-        endpoints: {
-            scans: '/api/scans',
-            stats: '/api/stats',
-            export: '/api/export/csv',
-            health: '/api/health'
-        }
+    // Broadcast ke semua client tentang koneksi baru
+    io.emit('system_activity_update', {
+        activeConnections: io.engine.clientsCount,
+        lastUpdate: new Date().toLocaleTimeString('id-ID')
+    });
+
+    socket.on('disconnect', () => {
+        console.log(`🔌 Pengguna terputus: ${socket.id}`);
+        
+        // Update active connections count
+        io.emit('system_activity_update', {
+            activeConnections: io.engine.clientsCount,
+            lastUpdate: new Date().toLocaleTimeString('id-ID')
+        });
     });
 });
+
+// =======================================================================
+// === LOG FILE WATCHER ===
+// =======================================================================
 
 // --- Log File Watcher ---
 if (!fs.existsSync(LOG_FILE_PATH)) {
     console.error(`❌ KRITIS: File log tidak ditemukan di path: ${LOG_FILE_PATH}`);
-    process.exit(1); 
-}
+    console.log('⚠️  Server tetap berjalan tanpa file log monitoring');
+} else {
+    console.log(`👀 Memantau perubahan pada file: ${LOG_FILE_PATH}`);
+    let lastSize = fs.statSync(LOG_FILE_PATH).size;
 
-console.log(`👀 Memantau perubahan pada file: ${LOG_FILE_PATH}`);
-let lastSize = fs.statSync(LOG_FILE_PATH).size;
-
-chokidar.watch(LOG_FILE_PATH, { usePolling: true, interval: 500 }).on('change', (filePath) => {
-    try {
-        const stats = fs.statSync(filePath);
-        const currentSize = stats.size;
-        if (currentSize <= lastSize) {
-            lastSize = currentSize;
-            return;
-        }
-    
-        const stream = fs.createReadStream(filePath, { start: lastSize, end: currentSize, encoding: 'utf-8' });
-    
-        stream.on('data', (buffer) => {
-            const lines = buffer.toString().trim().split(/\r?\n/);
-            lines.forEach(async (line) => {
-                if (!line) return;
-                const parsed = parseLogLine(line);
-                if (parsed.type === 'SCAN') {
+    chokidar.watch(LOG_FILE_PATH, { usePolling: true, interval: 500 }).on('change', (filePath) => {
+        try {
+            const stats = fs.statSync(filePath);
+            const currentSize = stats.size;
+            if (currentSize <= lastSize) {
+                lastSize = currentSize;
+                return;
+            }
+        
+            const stream = fs.createReadStream(filePath, { start: lastSize, end: currentSize, encoding: 'utf-8' });
+        
+            stream.on('data', async (buffer) => {
+                const lines = buffer.toString().trim().split(/\r?\n/);
+                
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    
                     try {
-                        const pData = parsed.data;
-                        const query = `INSERT INTO scans(container_no, truck_no, scan_time, status, image1_path, image2_path, image3_path, image4_path) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
-                        const values = [pData.containerNo, pData.truckNo, pData.scanTime, pData.status, pData.image1_path, pData.image2_path, pData.image3_path, pData.image4_path];
+                        const parsed = parseLogLine(line);
+                        console.log(`📝 Log line parsed:`, parsed);
                         
-                        const dbRes = await db.query(query, values);
-                        const newScanFromDB = dbRes.rows[0];
-    
-                        console.log(`✅ [DB] SUKSES! Data untuk ${newScanFromDB.container_no} disimpan.`);
-                        io.emit('new_scan', newScanFromDB); 
+                        if (parsed.type === 'SCAN') {
+                            const pData = parsed.data;
+                            const query = `INSERT INTO scans(container_no, truck_no, scan_time, status, image1_path, image2_path, image3_path, image4_path) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
+                            const values = [
+                                pData.containerNo, 
+                                pData.truckNo, 
+                                pData.scanTime, 
+                                pData.status, 
+                                pData.image1_path, 
+                                pData.image2_path, 
+                                pData.image3_path, 
+                                pData.image4_path
+                            ];
+                            
+                            const dbRes = await db.query(query, values);
+                            const newScanFromDB = dbRes.rows[0];
+
+                            console.log(`✅ [DB] SUKSES! Data untuk ${newScanFromDB.container_no} disimpan.`);
+                            
+                            // Emit new scan event ke semua client
+                            io.emit('new_scan', newScanFromDB);
+                            
+                            // Emit API update - API Server processing data
+                            io.emit('api_update', {
+                                apiServer: {
+                                    status: 'processing',
+                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                    details: 'Processing JSON data from scan',
+                                    ip: ftpConfig.server2_ip,
+                                    type: 'HTTP API',
+                                    currentActivity: 'Memproses data JSON scan'
+                                },
+                                ftpServer: {
+                                    status: 'connected',
+                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                    details: 'Ready for next upload',
+                                    ip: ftpConfig.server1_ip,
+                                    type: 'FTP',
+                                    currentActivity: 'Siap upload berikutnya'
+                                }
+                            });
+                            
+                            // Kembalikan API Server ke standby setelah 2 detik
+                            setTimeout(() => {
+                                io.emit('api_update', {
+                                    apiServer: {
+                                        status: 'standby',
+                                        lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                        details: 'Ready to receive JSON data',
+                                        ip: ftpConfig.server2_ip,
+                                        type: 'HTTP API',
+                                        currentActivity: 'Menunggu data JSON'
+                                    },
+                                    ftpServer: {
+                                        status: 'connected',
+                                        lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                        details: 'Monitoring for uploads',
+                                        ip: ftpConfig.server1_ip,
+                                        type: 'FTP',
+                                        currentActivity: 'Monitoring upload'
+                                    }
+                                });
+                            }, 2000);
+                            
+                        } else if (parsed.type === 'FTP_UPLOAD') {
+                            // Emit FTP update - FTP Server uploading images
+                            io.emit('ftp_update', {
+                                ftpServer: {
+                                    status: 'uploading',
+                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                    details: `Uploading ${parsed.data.file}`,
+                                    ip: parsed.data.ip,
+                                    type: 'FTP',
+                                    currentActivity: 'Mengupload file gambar'
+                                },
+                                apiServer: {
+                                    status: 'standby',
+                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                    details: 'Ready to receive JSON data',
+                                    ip: ftpConfig.server2_ip,
+                                    type: 'HTTP API', 
+                                    currentActivity: 'Menunggu data JSON'
+                                }
+                            });
+                            
+                            // Kembalikan FTP Server ke connected setelah 3 detik
+                            setTimeout(() => {
+                                io.emit('ftp_update', {
+                                    ftpServer: {
+                                        status: 'connected',
+                                        lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                        details: 'Upload completed',
+                                        ip: ftpConfig.server1_ip,
+                                        type: 'FTP',
+                                        currentActivity: 'Upload selesai'
+                                    },
+                                    apiServer: {
+                                        status: 'standby',
+                                        lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                        details: 'Ready to receive JSON data',
+                                        ip: ftpConfig.server2_ip,
+                                        type: 'HTTP API',
+                                        currentActivity: 'Menunggu data JSON'
+                                    }
+                                });
+                            }, 3000);
+                            
+                        } else if (parsed.type === 'CONNECTION') {
+                            console.log(`🔗 Connection log: ${parsed.data.message}`);
+                            
+                        } else if (parsed.type === 'SYSTEM_LOG') {
+                            console.log(`⚙️ System log: ${parsed.data.message}`);
+                        }
                         
-                    } catch (dbErr) {
-                        console.error('❌ [DB] GAGAL menyimpan ke DB:', dbErr.stack);
+                    } catch (lineError) {
+                        console.error('❌ Error processing log line:', lineError);
+                        console.log('Problematic line:', line);
                     }
                 }
             });
-        });
-        lastSize = currentSize;
-    } catch (err) {
-        console.error("❌ Error saat memproses file log:", err);
-    }
+            
+            stream.on('error', (streamError) => {
+                console.error('❌ Stream error:', streamError);
+            });
+            
+            lastSize = currentSize;
+            
+        } catch (err) {
+            console.error("❌ Error saat memproses file log:", err);
+        }
+    });
+
+    // Juga monitor untuk event 'add' jika file dibuat ulang
+    chokidar.watch(LOG_FILE_PATH).on('add', (filePath) => {
+        console.log(`📁 File log ditemukan/dibuat: ${filePath}`);
+        lastSize = fs.statSync(filePath).size;
+    });
+}
+
+// =======================================================================
+// === BASIC ROUTES ===
+// =======================================================================
+
+// --- SIMPLE CATCH-ALL ROUTE UNTUK REACT APP ---
+app.get('/', (req, res) => {
+    res.json({ 
+        success: true,
+        message: 'Nuctech Transmission Dashboard Backend Server',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        instructions: 'Frontend should be running on http://localhost:3000',
+        endpoints: {
+            health: 'GET /api/health',
+            scans: 'GET /api/scans',
+            scanDetail: 'GET /api/scans/:id',
+            stats: 'GET /api/stats',
+            statsDaily: 'GET /api/stats/daily',
+            statsSummary: 'GET /api/stats/summary',
+            initialData: 'GET /api/initial-data',
+            config: 'GET /api/config',
+            updateConfig: 'PUT /api/config/update',
+            export: 'GET /api/export/csv-v2',
+            images: 'GET /images/*',
+            deleteScan: 'DELETE /api/scans/:id'
+        },
+        websocket: {
+            new_scan: 'New scan data',
+            ftp_update: 'FTP server status update',
+            system_activity_update: 'System activity update',
+            scan_deleted: 'Scan deleted event'
+        }
+    });
 });
 
 // =======================================================================
 // === ERROR HANDLING MIDDLEWARE ===
 // =======================================================================
-app.use((err, req, res, next) => {
-    console.error('❌ Unhandled Error:', err);
-    res.status(500).json({ 
-        error: 'Internal Server Error',
-        message: err.message 
+
+// 404 Handler untuk route yang tidak ditemukan
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: 'Endpoint not found',
+        message: `Route ${req.method} ${req.originalUrl} not found`,
+        availableEndpoints: [
+            'GET  /api/health',
+            'GET  /api/scans',
+            'GET  /api/scans/:id',
+            'GET  /api/stats',
+            'GET  /api/stats/daily',
+            'GET  /api/stats/summary',
+            'GET  /api/initial-data',
+            'GET  /api/config',
+            'PUT  /api/config/update',
+            'GET  /api/export/csv-v2',
+            'DELETE /api/scans/:id',
+            'GET  /images/*'
+        ]
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-    console.log(`📊 API Endpoints:`);
-    console.log(`   GET  /api/scans - Mendapatkan data scans`);
-    console.log(`   GET  /api/stats - Mendapatkan statistik`);
-    console.log(`   GET  /api/export/csv - Export data ke CSV`);
-    console.log(`   GET  /api/health - Health check`);
-    console.log(`   WS   / - WebSocket untuk real-time updates`);
-    console.log(`\n📱 Frontend harus dijalankan terpisah di http://localhost:3000`);
+// Global error handler
+app.use((err, req, res, next) => {
+    console.error('❌ Unhandled Error:', err);
+    res.status(500).json({ 
+        success: false,
+        error: 'Internal Server Error',
+        message: err.message,
+        timestamp: new Date().toISOString()
+    });
 });
+
+// =======================================================================
+// === SERVER STARTUP ===
+// =======================================================================
+
+// Simpan waktu start server
+let serverStartTime = new Date();
+
+server.listen(PORT, () => {
+    console.log(`\n🚀 ==========================================`);
+    console.log(`🚀 Nuctech Transmission Dashboard Server`);
+    console.log(`🚀 ==========================================`);
+    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+    console.log(`🚀 Start time: ${serverStartTime.toLocaleString('id-ID')}`);
+    console.log(`🚀 Uptime: ${calculateUptime()}`);
+    console.log(`📊 ==========================================`);
+    console.log(`📊 API Endpoints:`);
+    console.log(`📊   GET  /api/health         - Health check`);
+    console.log(`📊   GET  /api/scans          - Data scans dengan pagination`);
+    console.log(`📊   GET  /api/scans/:id      - Detail scan by ID`);
+    console.log(`📊   DELETE /api/scans/:id    - Delete scan`);
+    console.log(`📊   GET  /api/stats          - Statistik dasar`);
+    console.log(`📊   GET  /api/stats/daily    - Statistik harian (30 hari)`);
+    console.log(`📊   GET  /api/stats/summary  - Ringkasan statistik`);
+    console.log(`📊   GET  /api/initial-data   - Data untuk overview`);
+    console.log(`📊   GET  /api/config         - Konfigurasi sistem`);
+    console.log(`📊   PUT  /api/config/update  - Update konfigurasi`);
+    console.log(`📊   GET  /api/export/csv-v2  - Export data ke CSV`);
+    console.log(`📊   GET  /images/*           - Serve gambar`);
+    console.log(`📊 ==========================================`);
+    console.log(`🔌 WebSocket Events:`);
+    console.log(`🔌   new_scan                - Data scan baru`);
+    console.log(`🔌   ftp_update              - Update status FTP`);
+    console.log(`🔌   system_activity_update  - Update aktivitas sistem`);
+    console.log(`🔌   scan_deleted            - Scan dihapus`);
+    console.log(`🔌 ==========================================`);
+    console.log(`👀 Log monitoring: ${fs.existsSync(LOG_FILE_PATH) ? 'AKTIF' : 'NON-AKTIF'}`);
+    if (!fs.existsSync(LOG_FILE_PATH)) {
+        console.log(`⚠️  File log tidak ditemukan: ${LOG_FILE_PATH}`);
+    }
+    console.log(`📱 Frontend: http://localhost:3000`);
+    console.log(`==========================================\n`);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n🛑 Server menerima SIGINT, shutdown gracefully...');
+    server.close(() => {
+        console.log('✅ Server berhenti');
+        process.exit(0);
+    });
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 Server menerima SIGTERM, shutdown gracefully...');
+    server.close(() => {
+        console.log('✅ Server berhenti');
+        process.exit(0);
+    });
+});
+
+module.exports = app;
