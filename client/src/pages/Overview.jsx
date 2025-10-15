@@ -1,13 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  Row, Col, Card, Statistic, Timeline, Typography, Tag, Spin, Alert,
-  Progress, Badge, Descriptions, List, Button, Tooltip, message
+  Row, Col, Card, Statistic, Typography, Tag, Spin, Alert,
+  Progress, Badge, Descriptions, List, Button
 } from 'antd';
 import {
   CheckCircleOutlined, CloseCircleOutlined, CloudServerOutlined,
-  DatabaseOutlined, FileTextOutlined, UploadOutlined, ClockCircleOutlined,
-  WifiOutlined, SyncOutlined, FileSyncOutlined, ReloadOutlined,
-  FileOutlined, TeamOutlined, CalendarOutlined,
+  DatabaseOutlined, ClockCircleOutlined,
+  ReloadOutlined, TeamOutlined, CalendarOutlined,
   CloudUploadOutlined, ApiOutlined, RocketOutlined
 } from '@ant-design/icons';
 import io from 'socket.io-client';
@@ -57,7 +56,7 @@ const Overview = () => {
     successRate: '0%'
   });
 
-  const [realTimeEvents, setRealTimeEvents] = useState([]);
+  const socketRef = useRef(null);
   const [socket, setSocket] = useState(null);
 
   // Fungsi untuk fetch data dengan fallback
@@ -156,10 +155,8 @@ const Overview = () => {
     try {
       setRefreshing(true);
       await fetchInitialData();
-      message.success('Data diperbarui');
     } catch (err) {
       console.error("Gagal refresh data:", err);
-      message.error('Gagal memperbarui data');
     } finally {
       setRefreshing(false);
     }
@@ -182,7 +179,7 @@ const Overview = () => {
     switch (status) {
       case 'connected': return <CheckCircleOutlined />;
       case 'uploading': return <CloudUploadOutlined />;
-      case 'processing': return <SyncOutlined spin />;
+      case 'processing': return <CheckCircleOutlined />;
       case 'standby': return <ClockCircleOutlined />;
       case 'error': return <CloseCircleOutlined />;
       default: return <ClockCircleOutlined />;
@@ -191,43 +188,38 @@ const Overview = () => {
 
   // Setup WebSocket connection
   useEffect(() => {
+    // Cegah multiple connections
+    if (socketRef.current?.connected) {
+      console.log('🔌 Socket sudah connected, skip');
+      return;
+    }
+
+    console.log('🔌 Creating WebSocket connection...');
+    
     const newSocket = io('http://localhost:5000', {
-      transports: ['websocket', 'polling'],
+      transports: ['websocket'],
       timeout: 10000
     });
 
     newSocket.on('connect', () => {
-      console.log('🔌 Connected to WebSocket server');
+      console.log('✅ Connected to WebSocket server');
+      socketRef.current = newSocket;
+      setSocket(newSocket);
     });
 
     newSocket.on('connect_error', (error) => {
       console.error('❌ WebSocket connection error:', error);
     });
 
-    setSocket(newSocket);
-
-    return () => {
-      if (newSocket) {
-        newSocket.disconnect();
-      }
-    };
-  }, []);
-
-  // Setup WebSocket listeners setelah socket tersedia
-  useEffect(() => {
-    if (!socket) return;
+    newSocket.on('disconnect', () => {
+      console.log('🔌 WebSocket disconnected');
+      socketRef.current = null;
+      setSocket(null);
+    });
 
     // Listener untuk update scan baru
-    socket.on('new_scan', (data) => {
+    newSocket.on('new_scan', (data) => {
       console.log('📨 New scan received:', data);
-      
-      // Add to real-time events
-      setRealTimeEvents(prev => [{
-        type: 'scan',
-        message: `New scan: ${data.container_no || 'Unknown'} - ${data.status || 'Unknown'}`,
-        timestamp: new Date().toLocaleTimeString('id-ID'),
-        data: data
-      }, ...prev.slice(0, 9)]);
       
       setRecentScans(prev => [data, ...prev.slice(0, 9)]);
       setStats(prev => ({
@@ -249,16 +241,8 @@ const Overview = () => {
     });
 
     // Listener untuk update FTP status
-    socket.on('ftp_update', (ftpData) => {
+    newSocket.on('ftp_update', (ftpData) => {
       console.log('📡 FTP update received:', ftpData);
-      
-      // Add to real-time events
-      setRealTimeEvents(prev => [{
-        type: 'ftp',
-        message: `FTP Server: ${ftpData.ftpServer?.status || 'unknown'} - ${ftpData.ftpServer?.details || 'No details'}`,
-        timestamp: new Date().toLocaleTimeString('id-ID'),
-        data: ftpData
-      }, ...prev.slice(0, 9)]);
       
       if (ftpData.ftpServer) {
         setSystemState(prev => ({
@@ -275,16 +259,8 @@ const Overview = () => {
     });
 
     // Listener untuk update API status
-    socket.on('api_update', (apiData) => {
+    newSocket.on('api_update', (apiData) => {
       console.log('🔗 API update received:', apiData);
-      
-      // Add to real-time events
-      setRealTimeEvents(prev => [{
-        type: 'api',
-        message: `API Server: ${apiData.apiServer?.status || 'unknown'} - ${apiData.apiServer?.details || 'No details'}`,
-        timestamp: new Date().toLocaleTimeString('id-ID'),
-        data: apiData
-      }, ...prev.slice(0, 9)]);
       
       if (apiData.apiServer) {
         setSystemState(prev => ({
@@ -301,7 +277,7 @@ const Overview = () => {
     });
 
     // Listener untuk update system activity
-    socket.on('system_activity_update', (activityData) => {
+    newSocket.on('system_activity_update', (activityData) => {
       console.log('🔄 System activity update:', activityData);
       setSystemActivity(prev => ({
         ...prev,
@@ -309,14 +285,14 @@ const Overview = () => {
       }));
     });
 
-    // Cleanup listeners
     return () => {
-      socket.off('new_scan');
-      socket.off('ftp_update');
-      socket.off('api_update');
-      socket.off('system_activity_update');
+      console.log('🧹 Cleaning up WebSocket connection...');
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
     };
-  }, [socket]);
+  }, []);
 
   // Fetch initial data pada mount
   useEffect(() => {
@@ -523,105 +499,58 @@ const Overview = () => {
               </Card>
             </Col>
             
-            {/* Recent Activity & Real-time Events */}
+            {/* Recent Scan Activity - FULL WIDTH */}
             <Col xs={24}>
-              <Row gutter={[16, 16]}>
-                {/* Recent Scan Activity */}
-                <Col xs={24} md={12}>
-                  <Card 
-                    title={
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <span>Recent Scan Activity</span>
-                        <Badge count={recentScans.length} showZero color='#1890ff' />
+              <Card 
+                title={
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>Recent Scan Activity</span>
+                    <Badge count={recentScans.length} showZero color='#1890ff' />
+                  </div>
+                } 
+                style={{ borderRadius: 8 }}
+                bodyStyle={{ padding: 0 }}
+              >
+                <List
+                  dataSource={recentScans}
+                  renderItem={(scan) => (
+                    <List.Item
+                      style={{
+                        padding: '12px 16px',
+                        borderBottom: '1px solid #f0f0f0',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}
+                    >
+                      <div style={{ flex: 1 }}>
+                        <Text strong style={{ display: 'block', fontSize: '14px' }}>
+                          Container: {scan.container_no || 'N/A'}
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: '12px' }}>
+                          Truck: {scan.truck_no || 'N/A'}
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: '11px', display: 'block', marginTop: 4 }}>
+                          <CalendarOutlined /> {scan.scan_time ? new Date(scan.scan_time).toLocaleString() : 'Unknown date'}
+                        </Text>
                       </div>
-                    } 
-                    style={{ borderRadius: 8, height: '100%' }}
-                    bodyStyle={{ padding: 0 }}
-                  >
-                    <List
-                      dataSource={recentScans}
-                      renderItem={(scan) => (
-                        <List.Item
-                          style={{
-                            padding: '12px 16px',
-                            borderBottom: '1px solid #f0f0f0',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center'
-                          }}
+                      <div style={{ textAlign: 'right' }}>
+                        <Tag 
+                          color={scan.status === 'OK' ? 'green' : 'red'}
+                          style={{ fontSize: '12px', marginBottom: 4 }}
                         >
-                          <div style={{ flex: 1 }}>
-                            <Text strong style={{ display: 'block', fontSize: '14px' }}>
-                              Container: {scan.container_no || 'N/A'}
-                            </Text>
-                            <Text type="secondary" style={{ fontSize: '12px' }}>
-                              Truck: {scan.truck_no || 'N/A'}
-                            </Text>
-                            <Text type="secondary" style={{ fontSize: '11px', display: 'block', marginTop: 4 }}>
-                              <CalendarOutlined /> {scan.scan_time ? new Date(scan.scan_time).toLocaleString() : 'Unknown date'}
-                            </Text>
-                          </div>
-                          <div style={{ textAlign: 'right' }}>
-                            <Tag 
-                              color={scan.status === 'OK' ? 'green' : 'red'}
-                              style={{ fontSize: '12px', marginBottom: 4 }}
-                            >
-                              {scan.status || 'UNKNOWN'}
-                            </Tag>
-                            <br />
-                            <Text type="secondary" style={{ fontSize: '10px' }}>
-                              ID: {scan.id || 'N/A'}
-                            </Text>
-                          </div>
-                        </List.Item>
-                      )}
-                      locale={{ emptyText: 'No scan activity yet' }}
-                    />
-                  </Card>
-                </Col>
-
-                {/* Real-time Events */}
-                <Col xs={24} md={12}>
-                  <Card 
-                    title={
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <span>Real-time Events</span>
-                        <Badge count={realTimeEvents.length} showZero color='#52c41a' />
+                          {scan.status || 'UNKNOWN'}
+                        </Tag>
+                        <br />
+                        <Text type="secondary" style={{ fontSize: '10px' }}>
+                          ID: {scan.id || 'N/A'}
+                        </Text>
                       </div>
-                    } 
-                    style={{ borderRadius: 8, height: '100%' }}
-                    bodyStyle={{ padding: 0 }}
-                  >
-                    <List
-                      dataSource={realTimeEvents}
-                      renderItem={(event, index) => (
-                        <List.Item
-                          style={{
-                            padding: '10px 16px',
-                            borderBottom: '1px solid #f0f0f0',
-                            background: index === 0 ? '#f6ffed' : 'transparent'
-                          }}
-                        >
-                          <div style={{ flex: 1 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
-                              {event.type === 'scan' && <DatabaseOutlined style={{ color: '#1890ff', marginRight: 8 }} />}
-                              {event.type === 'ftp' && <CloudUploadOutlined style={{ color: '#1890ff', marginRight: 8 }} />}
-                              {event.type === 'api' && <ApiOutlined style={{ color: '#52c41a', marginRight: 8 }} />}
-                              <Text style={{ fontSize: '13px', fontWeight: 'bold' }}>
-                                {event.message}
-                              </Text>
-                            </div>
-                            <Text type="secondary" style={{ fontSize: '11px', display: 'block' }}>
-                              <ClockCircleOutlined /> {event.timestamp}
-                            </Text>
-                          </div>
-                        </List.Item>
-                      )}
-                      locale={{ emptyText: 'No real-time events yet' }}
-                    />
-                  </Card>
-                </Col>
-              </Row>
+                    </List.Item>
+                  )}
+                  locale={{ emptyText: 'No scan activity yet' }}
+                />
+              </Card>
             </Col>
           </Row>
         </Col>
@@ -750,7 +679,7 @@ const Overview = () => {
                   <Descriptions.Item 
                     label={
                       <span>
-                        <FileOutlined style={{ marginRight: 4 }} />
+                        <DatabaseOutlined style={{ marginRight: 4 }} />
                         Log Files
                       </span>
                     }

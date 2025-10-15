@@ -254,7 +254,7 @@ function AppContent() {
               }} 
             />
             <Title level={3} style={{ margin: 0, color: '#1890ff' }}>
-              Nuctech Transmission Dashboard Monitoring 
+              Transmission Dashboard Monitoring 
             </Title>
           </div>
         </Header>
