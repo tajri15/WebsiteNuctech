@@ -7,7 +7,7 @@ const parseLogLine = (line) => {
       (line.includes('Ftp') && line.includes('Upload'))) {
     
     const ipMatch = line.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
-    const fileMatch = line.match(/(\w+\.(jpg|png|jpeg|txt|log|zip|rar))/i);
+    const fileMatch = line.match(/([\w\-\.]+\.(jpg|png|jpeg|txt|log|zip|rar|img))/i);
     
     return {
       type: 'FTP_UPLOAD',
@@ -20,13 +20,46 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 2. Cek untuk log JSON (data scan)
-  const jsonStartIndex = line.indexOf('{');
-  if (jsonStartIndex !== -1) {
+  // 2. Cek untuk response JSON yang berisi data scan (PENTING: pattern yang diperbaiki)
+  // Mencari pattern: "response text: { ... JSON ... }"
+  const responseTextMatch = line.match(/response text:\s*(\{.*\})/i);
+  if (responseTextMatch) {
     try {
-      const jsonString = line.substring(jsonStartIndex);
+      const jsonString = responseTextMatch[1];
       const data = JSON.parse(jsonString);
 
+      // Cek jika ini adalah response yang valid dengan resultData
+      if (data.resultCode !== undefined && data.resultData) {
+        const resultData = data.resultData;
+        
+        return {
+          type: 'SCAN',
+          data: {
+            containerNo: resultData.CONTAINER_NO || 'N/A',
+            truckNo: resultData.FYCO_PRESENT || 'N/A',
+            scanTime: resultData.SCANTIME || new Date().toISOString(),
+            status: data.resultCode === true ? 'OK' : 'NOK',
+            image1_path: resultData.IMAGE1_PATH || null,
+            image2_path: resultData.IMAGE2_PATH || null,
+            image3_path: resultData.IMAGE3_PATH || null,
+            image4_path: resultData.IMAGE4_PATH || null,
+            rawData: resultData // Simpan data lengkap untuk debugging
+          }
+        };
+      }
+    } catch (error) {
+      console.error('JSON parse error in response text:', error);
+      console.log('Problematic JSON string:', responseTextMatch[1]);
+    }
+  }
+
+  // 3. Cek untuk JSON langsung di baris (fallback)
+  const jsonMatch = line.match(/\{.*\}/);
+  if (jsonMatch) {
+    try {
+      const data = JSON.parse(jsonMatch[0]);
+      
+      // Jika ini adalah struktur resultData yang kita cari
       if (data.CONTAINER_NO && data.SCANTIME) {
         return {
           type: 'SCAN',
@@ -43,11 +76,11 @@ const parseLogLine = (line) => {
         };
       }
     } catch (error) {
-      console.error('JSON parse error:', error);
+      // Biarkan error, bukan JSON yang kita cari
     }
   }
 
-  // 3. Cek untuk connection logs
+  // 4. Cek untuk connection logs
   if (line.includes('connected') || line.includes('connection') || 
       line.includes('Connected') || line.includes('connect') ||
       line.includes('disconnect') || line.includes('Disconnected')) {
@@ -60,7 +93,7 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 4. Jika bukan keduanya, anggap sebagai log system
+  // 5. Jika bukan keduanya, anggap sebagai log system
   return { 
     type: 'SYSTEM_LOG',
     data: {
