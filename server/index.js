@@ -12,8 +12,8 @@ const { parseLogLine } = require('./logParser');
 const db = require('./db');
 
 // --- Konfigurasi Path (Disesuaikan untuk Laptop Anda) ---
-const LOG_FILE_PATH = 'C:\\Nuctech_Services\\ServiceTransmission\\logs\\Transmission.log';
-const CONFIG_FILE_PATH = 'C:\\Nuctech_Services\\ServiceTransmission\\config.ini';
+const LOG_FILE_PATH = 'Y:\\Transmission.log';
+const CONFIG_FILE_PATH = 'Y:\\config.ini';
 const PORT = process.env.PORT || 5000;
 
 const app = express();
@@ -51,7 +51,7 @@ try {
 // --- Middleware ---
 app.use(cors());
 app.use(express.json());
-const imageFolderPath = 'D:\\Image'; 
+const imageFolderPath = 'Z:/'; 
 app.use('/images', express.static(imageFolderPath));
 console.log(`🖼️  Menyajikan gambar dari folder: ${imageFolderPath}`);
 
