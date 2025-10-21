@@ -702,8 +702,6 @@ io.on('connection', (socket) => {
 // =======================================================================
 // === LOG FILE WATCHER ===
 // =======================================================================
-
-// --- Log File Watcher ---
 if (!fs.existsSync(LOG_FILE_PATH)) {
     console.error(`❌ KRITIS: File log tidak ditemukan di path: ${LOG_FILE_PATH}`);
     console.log('⚠️  Server tetap berjalan tanpa file log monitoring');
@@ -711,169 +709,247 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
     console.log(`👀 Memantau perubahan pada file: ${LOG_FILE_PATH}`);
     let lastSize = fs.statSync(LOG_FILE_PATH).size;
 
-    chokidar.watch(LOG_FILE_PATH, { usePolling: true, interval: 500 }).on('change', (filePath) => {
+    const watcher = chokidar.watch(LOG_FILE_PATH, { 
+        usePolling: true, 
+        interval: 500,
+        persistent: true,
+        ignoreInitial: true
+    });
+
+    watcher.on('change', async (filePath) => {
         try {
+            console.log(`📁 File changed: ${filePath}`);
             const stats = fs.statSync(filePath);
             const currentSize = stats.size;
+            
             if (currentSize <= lastSize) {
+                console.log(`📏 No new content. Current: ${currentSize}, Last: ${lastSize}`);
                 lastSize = currentSize;
                 return;
             }
-        
-            const stream = fs.createReadStream(filePath, { start: lastSize, end: currentSize, encoding: 'utf-8' });
-        
-            stream.on('data', async (buffer) => {
-                const lines = buffer.toString().trim().split(/\r?\n/);
-                
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    
-                    try {
-                        const parsed = parseLogLine(line);
-                        console.log(`📝 Log line parsed:`, parsed);
-                        
-                        if (parsed.type === 'SCAN') {
-                            const pData = parsed.data;
-                            const query = `INSERT INTO scans(
-                                container_no, truck_no, scan_time, status, 
-                                image1_path, image2_path, image3_path, image4_path, error_message
-                            ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`;
-                            
-                            const values = [
-                                pData.containerNo, 
-                                pData.truckNo, 
-                                pData.scanTime, 
-                                pData.status, 
-                                pData.image1_path, 
-                                pData.image2_path, 
-                                pData.image3_path, 
-                                pData.image4_path,
-                                pData.errorMessage || null  // Tambahkan error_message
-                            ];
-                            
-                            const dbRes = await db.query(query, values);
-                            const newScanFromDB = dbRes.rows[0];
 
-                            console.log(`✅ [DB] SUKSES! Data scan ${newScanFromDB.status} disimpan.`);
+            console.log(`📖 Reading new content from position ${lastSize} to ${currentSize}`);
+            
+            const stream = fs.createReadStream(filePath, { 
+                start: lastSize, 
+                end: currentSize, 
+                encoding: 'utf-8' 
+            });
+
+            let bufferData = '';
+            
+            stream.on('data', (chunk) => {
+                bufferData += chunk;
+            });
+
+            stream.on('end', async () => {
+                try {
+                    if (!bufferData.trim()) {
+                        console.log('📭 No new data to process');
+                        lastSize = currentSize;
+                        return;
+                    }
+
+                    const lines = bufferData.split(/\r?\n/).filter(line => line.trim());
+                    console.log(`📝 Processing ${lines.length} new lines`);
+                    
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        
+                        try {
+                            console.log(`🔍 Processing line: ${line.substring(0, 100)}...`);
+                            const parsed = parseLogLine(line);
+                            console.log(`📝 Log line parsed:`, JSON.stringify(parsed, null, 2));
                             
-                            // Emit new scan event ke semua client
-                            io.emit('new_scan', newScanFromDB);
-                            
-                            // Emit API update - API Server processing data
-                            io.emit('api_update', {
-                                apiServer: {
-                                    status: 'processing',
-                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                    details: 'Processing JSON data from scan',
-                                    ip: ftpConfig.server2_ip,
-                                    type: 'HTTP API',
-                                    currentActivity: 'Memproses data JSON scan'
-                                },
-                                ftpServer: {
-                                    status: 'connected',
-                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                    details: 'Ready for next upload',
-                                    ip: ftpConfig.server1_ip,
-                                    type: 'FTP',
-                                    currentActivity: 'Siap upload berikutnya'
-                                }
-                            });
-                            
-                            // Kembalikan API Server ke standby setelah 2 detik
-                            setTimeout(() => {
+                            if (parsed.type === 'SCAN') {
+                                const pData = parsed.data;
+                                
+                                // Debug data yang akan disimpan
+                                console.log('💾 Preparing to save scan data:', {
+                                    containerNo: pData.containerNo,
+                                    truckNo: pData.truckNo,
+                                    scanTime: pData.scanTime,
+                                    status: pData.status,
+                                    hasImages: !!(pData.image1_path || pData.image2_path || pData.image3_path || pData.image4_path),
+                                    errorMessage: pData.errorMessage
+                                });
+
+                                const query = `INSERT INTO scans(
+                                    container_no, truck_no, scan_time, status, 
+                                    image1_path, image2_path, image3_path, image4_path, error_message
+                                ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`;
+                                
+                                const values = [
+                                    pData.containerNo, 
+                                    pData.truckNo, 
+                                    pData.scanTime, 
+                                    pData.status, 
+                                    pData.image1_path, 
+                                    pData.image2_path, 
+                                    pData.image3_path, 
+                                    pData.image4_path,
+                                    pData.errorMessage || null
+                                ];
+                                
+                                console.log('🗄️ Executing database query...');
+                                const dbRes = await db.query(query, values);
+                                const newScanFromDB = dbRes.rows[0];
+
+                                console.log(`✅ [DB] SUKSES! Data scan ${newScanFromDB.status} disimpan. ID: ${newScanFromDB.id}`);
+                                
+                                // Emit new scan event ke semua client
+                                console.log(`📢 Emitting new_scan event to ${io.engine.clientsCount} clients`);
+                                io.emit('new_scan', newScanFromDB);
+                                
+                                // Emit stats update
+                                io.emit('stats_update', {
+                                    total: (await db.query('SELECT COUNT(*) FROM scans')).rows[0].count,
+                                    ok: (await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['OK'])).rows[0].count,
+                                    nok: (await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['NOK'])).rows[0].count
+                                });
+                                
+                                // Emit API update - API Server processing data
                                 io.emit('api_update', {
                                     apiServer: {
-                                        status: 'standby',
+                                        status: 'processing',
                                         lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                        details: 'Ready to receive JSON data',
+                                        details: 'Processing JSON data from scan',
                                         ip: ftpConfig.server2_ip,
                                         type: 'HTTP API',
-                                        currentActivity: 'Menunggu data JSON'
+                                        currentActivity: 'Memproses data JSON scan'
                                     },
                                     ftpServer: {
                                         status: 'connected',
                                         lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                        details: 'Monitoring for uploads',
+                                        details: 'Ready for next upload',
                                         ip: ftpConfig.server1_ip,
                                         type: 'FTP',
-                                        currentActivity: 'Monitoring upload'
+                                        currentActivity: 'Siap upload berikutnya'
                                     }
                                 });
-                            }, 2000);
-                            
-                        } else if (parsed.type === 'FTP_UPLOAD') {
-                            // Emit FTP update - FTP Server uploading images
-                            io.emit('ftp_update', {
-                                ftpServer: {
-                                    status: 'uploading',
-                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                    details: `Uploading ${parsed.data.file}`,
-                                    ip: parsed.data.ip,
-                                    type: 'FTP',
-                                    currentActivity: 'Mengupload file gambar'
-                                },
-                                apiServer: {
-                                    status: 'standby',
-                                    lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                    details: 'Ready to receive JSON data',
-                                    ip: ftpConfig.server2_ip,
-                                    type: 'HTTP API', 
-                                    currentActivity: 'Menunggu data JSON'
-                                }
-                            });
-                            
-                            // Kembalikan FTP Server ke connected setelah 3 detik
-                            setTimeout(() => {
+                                
+                                // Kembalikan API Server ke standby setelah 2 detik
+                                setTimeout(() => {
+                                    io.emit('api_update', {
+                                        apiServer: {
+                                            status: 'standby',
+                                            lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                            details: 'Ready to receive JSON data',
+                                            ip: ftpConfig.server2_ip,
+                                            type: 'HTTP API',
+                                            currentActivity: 'Menunggu data JSON'
+                                        },
+                                        ftpServer: {
+                                            status: 'connected',
+                                            lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                            details: 'Monitoring for uploads',
+                                            ip: ftpConfig.server1_ip,
+                                            type: 'FTP',
+                                            currentActivity: 'Monitoring upload'
+                                        }
+                                    });
+                                }, 2000);
+                                
+                            } else if (parsed.type === 'FTP_UPLOAD') {
+                                console.log(`📤 FTP Upload detected: ${parsed.data.file}`);
+                                
+                                // Emit FTP update - FTP Server uploading images
                                 io.emit('ftp_update', {
                                     ftpServer: {
-                                        status: 'connected',
+                                        status: 'uploading',
                                         lastActivity: new Date().toLocaleTimeString('id-ID'),
-                                        details: 'Upload completed',
-                                        ip: ftpConfig.server1_ip,
+                                        details: `Uploading ${parsed.data.file}`,
+                                        ip: parsed.data.ip,
                                         type: 'FTP',
-                                        currentActivity: 'Upload selesai'
+                                        currentActivity: 'Mengupload file gambar'
                                     },
                                     apiServer: {
                                         status: 'standby',
                                         lastActivity: new Date().toLocaleTimeString('id-ID'),
                                         details: 'Ready to receive JSON data',
                                         ip: ftpConfig.server2_ip,
-                                        type: 'HTTP API',
+                                        type: 'HTTP API', 
                                         currentActivity: 'Menunggu data JSON'
                                     }
                                 });
-                            }, 3000);
+                                
+                                // Kembalikan FTP Server ke connected setelah 3 detik
+                                setTimeout(() => {
+                                    io.emit('ftp_update', {
+                                        ftpServer: {
+                                            status: 'connected',
+                                            lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                            details: 'Upload completed',
+                                            ip: ftpConfig.server1_ip,
+                                            type: 'FTP',
+                                            currentActivity: 'Upload selesai'
+                                        },
+                                        apiServer: {
+                                            status: 'standby',
+                                            lastActivity: new Date().toLocaleTimeString('id-ID'),
+                                            details: 'Ready to receive JSON data',
+                                            ip: ftpConfig.server2_ip,
+                                            type: 'HTTP API',
+                                            currentActivity: 'Menunggu data JSON'
+                                        }
+                                    });
+                                }, 3000);
+                                
+                            } else if (parsed.type === 'CONNECTION') {
+                                console.log(`🔗 Connection log: ${parsed.data.message}`);
+                                
+                            } else if (parsed.type === 'SYSTEM_LOG') {
+                                // Skip system log untuk mengurangi console spam
+                                // console.log(`⚙️ System log: ${parsed.data.message}`);
+                            }
                             
-                        } else if (parsed.type === 'CONNECTION') {
-                            console.log(`🔗 Connection log: ${parsed.data.message}`);
-                            
-                        } else if (parsed.type === 'SYSTEM_LOG') {
-                            console.log(`⚙️ System log: ${parsed.data.message}`);
+                        } catch (lineError) {
+                            console.error('❌ Error processing log line:', lineError);
+                            console.log('Problematic line:', line);
                         }
-                        
-                    } catch (lineError) {
-                        console.error('❌ Error processing log line:', lineError);
-                        console.log('Problematic line:', line);
                     }
+                    
+                    lastSize = currentSize;
+                    console.log(`📊 Processing complete. Last size updated to: ${lastSize}`);
+                    
+                } catch (processError) {
+                    console.error('❌ Error processing buffer data:', processError);
                 }
             });
-            
+
             stream.on('error', (streamError) => {
                 console.error('❌ Stream error:', streamError);
+                lastSize = currentSize; // Reset lastSize to avoid infinite loop
             });
-            
-            lastSize = currentSize;
             
         } catch (err) {
             console.error("❌ Error saat memproses file log:", err);
+            // Try to reset lastSize to prevent getting stuck
+            try {
+                lastSize = fs.statSync(filePath).size;
+            } catch (e) {
+                console.error('❌ Cannot reset lastSize:', e);
+            }
         }
     });
 
-    // Juga monitor untuk event 'add' jika file dibuat ulang
-    chokidar.watch(LOG_FILE_PATH).on('add', (filePath) => {
+    // Handle file addition (if recreated)
+    watcher.on('add', (filePath) => {
         console.log(`📁 File log ditemukan/dibuat: ${filePath}`);
-        lastSize = fs.statSync(filePath).size;
+        try {
+            lastSize = fs.statSync(filePath).size;
+            console.log(`📏 Reset lastSize to: ${lastSize}`);
+        } catch (error) {
+            console.error('❌ Error getting file size on add:', error);
+        }
     });
+
+    // Handle errors
+    watcher.on('error', (error) => {
+        console.error('❌ Watcher error:', error);
+    });
+
+    console.log(`✅ Log file watcher aktif untuk: ${LOG_FILE_PATH}`);
 }
 
 // =======================================================================

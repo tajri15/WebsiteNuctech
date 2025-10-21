@@ -1,7 +1,7 @@
 const parseLogLine = (line) => {
-  console.log('Parsing line:', line);
+  console.log('🔍 Parsing line:', line.substring(0, 200) + '...');
 
-  // 1. Cek untuk log FTP Upload dengan berbagai format
+  // 1. Cek untuk log FTP Upload
   if ((line.includes('FTP') && line.includes('UPLOAD')) || 
       (line.includes('ftp') && line.includes('upload')) ||
       (line.includes('Ftp') && line.includes('Upload'))) {
@@ -20,76 +20,103 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 2. Cek untuk response JSON yang berisi data scan - DIPERBAIKI
-  // Mencari pattern: "center response:...,response code: 200,response text: { ... JSON ... }"
-  const responseTextMatch = line.match(/center response:.*?response code: 200,response text:\s*(\{.*\})/i);
-  if (responseTextMatch) {
-    try {
-      const jsonString = responseTextMatch[1];
-      const data = JSON.parse(jsonString);
+  // 2. Cek untuk response JSON yang berisi data scan - PATTERN DIPERBAIKI
+  // Pattern yang lebih fleksibel
+  const responsePatterns = [
+    /center response:.*?response code: 200,response text:\s*(\{.*\})/i,
+    /response text:\s*(\{.*\})/i,
+    /"resultCode":(true|false)/i
+  ];
 
-      console.log('✅ Found JSON response:', data);
-
-      // Handle case NOK (resultCode: false)
-      if (data.resultCode === false) {
-        return {
-          type: 'SCAN',
-          data: {
-            containerNo: 'N/A',
-            truckNo: 'N/A',
-            scanTime: new Date().toISOString(),
-            status: 'NOK',
-            image1_path: null,
-            image2_path: null,
-            image3_path: null,
-            image4_path: null,
-            errorMessage: data.resultDesc || 'Scan failed',
-            rawData: data
-          }
-        };
+  for (const pattern of responsePatterns) {
+    const match = line.match(pattern);
+    if (match) {
+      console.log('✅ Pattern matched:', pattern.toString());
+      
+      let jsonString = match[1] || line;
+      
+      // Jika pattern ketiga, cari JSON object lengkap
+      if (pattern === responsePatterns[2]) {
+        const jsonMatch = line.match(/\{.*\}/);
+        if (jsonMatch) {
+          jsonString = jsonMatch[0];
+        }
       }
 
-      // Handle case OK (resultCode: true) dengan resultData object
-      if (data.resultCode === true && data.resultData && typeof data.resultData === 'object') {
-        const resultData = data.resultData;
-        
-        return {
-          type: 'SCAN',
-          data: {
-            containerNo: resultData.CONTAINER_NO || 'N/A',
-            truckNo: resultData.FYCO_PRESENT || 'N/A',
-            scanTime: resultData.SCANTIME || new Date().toISOString(),
-            status: 'OK',
-            image1_path: resultData.IMAGE1_PATH || null,
-            image2_path: resultData.IMAGE2_PATH || null,
-            image3_path: resultData.IMAGE3_PATH || null,
-            image4_path: resultData.IMAGE4_PATH || null,
-            rawData: resultData
-          }
-        };
-      }
+      try {
+        console.log('📋 Attempting to parse JSON:', jsonString.substring(0, 200) + '...');
+        const data = JSON.parse(jsonString);
 
-      // Handle case OK dengan resultData string atau format lain
-      if (data.resultCode === true) {
-        return {
-          type: 'SCAN',
-          data: {
-            containerNo: 'N/A',
-            truckNo: 'N/A',
-            scanTime: new Date().toISOString(),
-            status: 'OK',
-            image1_path: null,
-            image2_path: null,
-            image3_path: null,
-            image4_path: null,
-            rawData: data
-          }
-        };
-      }
+        console.log('✅ JSON parsed successfully:', {
+          resultCode: data.resultCode,
+          hasResultData: !!data.resultData,
+          resultDataType: typeof data.resultData
+        });
 
-    } catch (error) {
-      console.error('❌ JSON parse error in response text:', error);
-      console.log('Problematic JSON string:', responseTextMatch[1]);
+        // Handle case NOK (resultCode: false)
+        if (data.resultCode === false) {
+          console.log('🔴 Processing NOK scan');
+          return {
+            type: 'SCAN',
+            data: {
+              containerNo: 'N/A',
+              truckNo: 'N/A',
+              scanTime: new Date().toISOString(),
+              status: 'NOK',
+              image1_path: null,
+              image2_path: null,
+              image3_path: null,
+              image4_path: null,
+              errorMessage: data.resultDesc || 'Scan failed',
+              rawData: data
+            }
+          };
+        }
+
+        // Handle case OK (resultCode: true) dengan resultData object
+        if (data.resultCode === true && data.resultData && typeof data.resultData === 'object') {
+          const resultData = data.resultData;
+          console.log('🟢 Processing OK scan with resultData object');
+          
+          return {
+            type: 'SCAN',
+            data: {
+              containerNo: resultData.CONTAINER_NO || 'N/A',
+              truckNo: resultData.FYCO_PRESENT || 'N/A',
+              scanTime: resultData.SCANTIME || new Date().toISOString(),
+              status: 'OK',
+              image1_path: resultData.IMAGE1_PATH || null,
+              image2_path: resultData.IMAGE2_PATH || null,
+              image3_path: resultData.IMAGE3_PATH || null,
+              image4_path: resultData.IMAGE4_PATH || null,
+              rawData: resultData
+            }
+          };
+        }
+
+        // Handle case OK dengan resultData string atau format lain
+        if (data.resultCode === true) {
+          console.log('🟢 Processing OK scan without resultData object');
+          return {
+            type: 'SCAN',
+            data: {
+              containerNo: 'N/A',
+              truckNo: 'N/A',
+              scanTime: new Date().toISOString(),
+              status: 'OK',
+              image1_path: null,
+              image2_path: null,
+              image3_path: null,
+              image4_path: null,
+              rawData: data
+            }
+          };
+        }
+
+      } catch (error) {
+        console.error('❌ JSON parse error:', error.message);
+        continue; // Coba pattern berikutnya
+      }
     }
   }
 
@@ -97,26 +124,56 @@ const parseLogLine = (line) => {
   const jsonMatch = line.match(/\{.*\}/);
   if (jsonMatch) {
     try {
-      const data = JSON.parse(jsonMatch[0]);
+      const jsonString = jsonMatch[0];
+      console.log('🔍 Fallback JSON detection attempt:', jsonString.substring(0, 200) + '...');
       
-      // Jika ini adalah struktur resultData yang kita cari
-      if (data.CONTAINER_NO && data.SCANTIME) {
-        return {
-          type: 'SCAN',
-          data: {
-            containerNo: data.CONTAINER_NO,
-            truckNo: data.FYCO_PRESENT || 'N/A',
-            scanTime: data.SCANTIME,
-            status: data.RESPON_TPKS_API === 'OK' ? 'OK' : 'NOK',
-            image1_path: data.IMAGE1_PATH || null,
-            image2_path: data.IMAGE2_PATH || null,
-            image3_path: data.IMAGE3_PATH || null,
-            image4_path: data.IMAGE4_PATH || null,
-          }
-        };
+      const data = JSON.parse(jsonString);
+      
+      // Cek jika ini adalah struktur scan data
+      if (data.resultCode !== undefined) {
+        console.log('🔄 Processing via fallback JSON');
+        
+        // Handle NOK case
+        if (data.resultCode === false) {
+          return {
+            type: 'SCAN',
+            data: {
+              containerNo: 'N/A',
+              truckNo: 'N/A',
+              scanTime: new Date().toISOString(),
+              status: 'NOK',
+              image1_path: null,
+              image2_path: null,
+              image3_path: null,
+              image4_path: null,
+              errorMessage: data.resultDesc || 'Scan failed',
+              rawData: data
+            }
+          };
+        }
+        
+        // Handle OK case dengan resultData
+        if (data.resultCode === true && data.resultData && typeof data.resultData === 'object') {
+          const resultData = data.resultData;
+          return {
+            type: 'SCAN',
+            data: {
+              containerNo: resultData.CONTAINER_NO || 'N/A',
+              truckNo: resultData.FYCO_PRESENT || 'N/A',
+              scanTime: resultData.SCANTIME || new Date().toISOString(),
+              status: 'OK',
+              image1_path: resultData.IMAGE1_PATH || null,
+              image2_path: resultData.IMAGE2_PATH || null,
+              image3_path: resultData.IMAGE3_PATH || null,
+              image4_path: resultData.IMAGE4_PATH || null,
+              rawData: resultData
+            }
+          };
+        }
       }
+
     } catch (error) {
-      // Biarkan error, bukan JSON yang kita cari
+      console.log('⚠️ Fallback JSON parse failed, ignoring line');
     }
   }
 
