@@ -20,16 +20,37 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 2. Cek untuk response JSON yang berisi data scan (PENTING: pattern yang diperbaiki)
-  // Mencari pattern: "response text: { ... JSON ... }"
-  const responseTextMatch = line.match(/response text:\s*(\{.*\})/i);
+  // 2. Cek untuk response JSON yang berisi data scan - DIPERBAIKI
+  // Mencari pattern: "center response:...,response code: 200,response text: { ... JSON ... }"
+  const responseTextMatch = line.match(/center response:.*?response code: 200,response text:\s*(\{.*\})/i);
   if (responseTextMatch) {
     try {
       const jsonString = responseTextMatch[1];
       const data = JSON.parse(jsonString);
 
-      // Cek jika ini adalah response yang valid dengan resultData
-      if (data.resultCode !== undefined && data.resultData) {
+      console.log('✅ Found JSON response:', data);
+
+      // Handle case NOK (resultCode: false)
+      if (data.resultCode === false) {
+        return {
+          type: 'SCAN',
+          data: {
+            containerNo: 'N/A',
+            truckNo: 'N/A',
+            scanTime: new Date().toISOString(),
+            status: 'NOK',
+            image1_path: null,
+            image2_path: null,
+            image3_path: null,
+            image4_path: null,
+            errorMessage: data.resultDesc || 'Scan failed',
+            rawData: data
+          }
+        };
+      }
+
+      // Handle case OK (resultCode: true) dengan resultData object
+      if (data.resultCode === true && data.resultData && typeof data.resultData === 'object') {
         const resultData = data.resultData;
         
         return {
@@ -38,22 +59,41 @@ const parseLogLine = (line) => {
             containerNo: resultData.CONTAINER_NO || 'N/A',
             truckNo: resultData.FYCO_PRESENT || 'N/A',
             scanTime: resultData.SCANTIME || new Date().toISOString(),
-            status: data.resultCode === true ? 'OK' : 'NOK',
+            status: 'OK',
             image1_path: resultData.IMAGE1_PATH || null,
             image2_path: resultData.IMAGE2_PATH || null,
             image3_path: resultData.IMAGE3_PATH || null,
             image4_path: resultData.IMAGE4_PATH || null,
-            rawData: resultData // Simpan data lengkap untuk debugging
+            rawData: resultData
           }
         };
       }
+
+      // Handle case OK dengan resultData string atau format lain
+      if (data.resultCode === true) {
+        return {
+          type: 'SCAN',
+          data: {
+            containerNo: 'N/A',
+            truckNo: 'N/A',
+            scanTime: new Date().toISOString(),
+            status: 'OK',
+            image1_path: null,
+            image2_path: null,
+            image3_path: null,
+            image4_path: null,
+            rawData: data
+          }
+        };
+      }
+
     } catch (error) {
-      console.error('JSON parse error in response text:', error);
+      console.error('❌ JSON parse error in response text:', error);
       console.log('Problematic JSON string:', responseTextMatch[1]);
     }
   }
 
-  // 3. Cek untuk JSON langsung di baris (fallback)
+  // 3. Fallback: Cek untuk JSON langsung di baris
   const jsonMatch = line.match(/\{.*\}/);
   if (jsonMatch) {
     try {

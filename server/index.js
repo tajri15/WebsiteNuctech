@@ -734,7 +734,11 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                         
                         if (parsed.type === 'SCAN') {
                             const pData = parsed.data;
-                            const query = `INSERT INTO scans(container_no, truck_no, scan_time, status, image1_path, image2_path, image3_path, image4_path) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
+                            const query = `INSERT INTO scans(
+                                container_no, truck_no, scan_time, status, 
+                                image1_path, image2_path, image3_path, image4_path, error_message
+                            ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`;
+                            
                             const values = [
                                 pData.containerNo, 
                                 pData.truckNo, 
@@ -743,13 +747,14 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                 pData.image1_path, 
                                 pData.image2_path, 
                                 pData.image3_path, 
-                                pData.image4_path
+                                pData.image4_path,
+                                pData.errorMessage || null  // Tambahkan error_message
                             ];
                             
                             const dbRes = await db.query(query, values);
                             const newScanFromDB = dbRes.rows[0];
 
-                            console.log(`✅ [DB] SUKSES! Data untuk ${newScanFromDB.container_no} disimpan.`);
+                            console.log(`✅ [DB] SUKSES! Data scan ${newScanFromDB.status} disimpan.`);
                             
                             // Emit new scan event ke semua client
                             io.emit('new_scan', newScanFromDB);
