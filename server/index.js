@@ -651,6 +651,79 @@ app.delete('/api/scans/:id', async (req, res) => {
 });
 
 // =======================================================================
+// === DEBUG ENDPOINTS ===
+// =======================================================================
+
+// Endpoint untuk mengecek schema database
+app.get('/api/debug/db-schema', async (req, res) => {
+    try {
+        const result = await db.query(`
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns 
+            WHERE table_name = 'scans' 
+            ORDER BY ordinal_position;
+        `);
+        
+        res.json({
+            success: true,
+            columns: result.rows,
+            totalColumns: result.rows.length
+        });
+    } catch (error) {
+        console.error('❌ Error checking schema:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Endpoint untuk mengecek data terbaru
+app.get('/api/debug/recent-scans', async (req, res) => {
+    try {
+        const result = await db.query(`
+            SELECT * FROM scans 
+            ORDER BY created_at DESC 
+            LIMIT 5
+        `);
+        
+        res.json({
+            success: true,
+            scans: result.rows,
+            total: result.rows.length
+        });
+    } catch (error) {
+        console.error('❌ Error fetching recent scans:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Endpoint untuk memperbaiki schema (opsional)
+app.post('/api/debug/fix-schema', async (req, res) => {
+    try {
+        // Tambahkan kolom error_message jika belum ada
+        await db.query(`
+            ALTER TABLE scans 
+            ADD COLUMN IF NOT EXISTS error_message TEXT
+        `);
+        
+        res.json({
+            success: true,
+            message: 'Schema checked/fixed successfully'
+        });
+    } catch (error) {
+        console.error('❌ Error fixing schema:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// =======================================================================
 // === HELPER FUNCTIONS ===
 // =======================================================================
 
@@ -702,6 +775,8 @@ io.on('connection', (socket) => {
 // =======================================================================
 // === LOG FILE WATCHER ===
 // =======================================================================
+
+// --- Log File Watcher ---
 if (!fs.existsSync(LOG_FILE_PATH)) {
     console.error(`❌ KRITIS: File log tidak ditemukan di path: ${LOG_FILE_PATH}`);
     console.log('⚠️  Server tetap berjalan tanpa file log monitoring');
@@ -770,14 +845,14 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     truckNo: pData.truckNo,
                                     scanTime: pData.scanTime,
                                     status: pData.status,
-                                    hasImages: !!(pData.image1_path || pData.image2_path || pData.image3_path || pData.image4_path),
-                                    errorMessage: pData.errorMessage
+                                    hasImages: !!(pData.image1_path || pData.image2_path || pData.image3_path || pData.image4_path)
                                 });
 
+                                // QUERY YANG DIPERBAIKI - SESUAI SCHEMA DATABASE
                                 const query = `INSERT INTO scans(
                                     container_no, truck_no, scan_time, status, 
-                                    image1_path, image2_path, image3_path, image4_path, error_message
-                                ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`;
+                                    image1_path, image2_path, image3_path, image4_path
+                                ) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
                                 
                                 const values = [
                                     pData.containerNo, 
@@ -787,26 +862,40 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     pData.image1_path, 
                                     pData.image2_path, 
                                     pData.image3_path, 
-                                    pData.image4_path,
-                                    pData.errorMessage || null
+                                    pData.image4_path
+                                    // error_message dihapus dari values karena tidak ada di schema
                                 ];
                                 
                                 console.log('🗄️ Executing database query...');
                                 const dbRes = await db.query(query, values);
                                 const newScanFromDB = dbRes.rows[0];
 
-                                console.log(`✅ [DB] SUKSES! Data scan ${newScanFromDB.status} disimpan. ID: ${newScanFromDB.id}`);
+                                console.log(`✅ [DB] SUKSES! Data scan ${newScanFromDB.status} disimpan. ID: ${newScanFromDB.id}, Container: ${newScanFromDB.container_no}`);
                                 
                                 // Emit new scan event ke semua client
                                 console.log(`📢 Emitting new_scan event to ${io.engine.clientsCount} clients`);
                                 io.emit('new_scan', newScanFromDB);
                                 
-                                // Emit stats update
-                                io.emit('stats_update', {
-                                    total: (await db.query('SELECT COUNT(*) FROM scans')).rows[0].count,
-                                    ok: (await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['OK'])).rows[0].count,
-                                    nok: (await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['NOK'])).rows[0].count
-                                });
+                                // Emit stats update dengan error handling
+                                try {
+                                    const totalResult = await db.query('SELECT COUNT(*) FROM scans');
+                                    const okResult = await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['OK']);
+                                    const nokResult = await db.query('SELECT COUNT(*) FROM scans WHERE status = $1', ['NOK']);
+                                    
+                                    io.emit('stats_update', {
+                                        total: parseInt(totalResult.rows[0].count),
+                                        ok: parseInt(okResult.rows[0].count),
+                                        nok: parseInt(nokResult.rows[0].count)
+                                    });
+                                    
+                                    console.log('📊 Stats updated:', {
+                                        total: parseInt(totalResult.rows[0].count),
+                                        ok: parseInt(okResult.rows[0].count),
+                                        nok: parseInt(nokResult.rows[0].count)
+                                    });
+                                } catch (statsError) {
+                                    console.error('❌ Error updating stats:', statsError);
+                                }
                                 
                                 // Emit API update - API Server processing data
                                 io.emit('api_update', {
@@ -906,6 +995,37 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                         } catch (lineError) {
                             console.error('❌ Error processing log line:', lineError);
                             console.log('Problematic line:', line);
+                            
+                            // Jika error karena database, coba dengan query yang lebih sederhana
+                            if (lineError.message.includes('column') && lineError.message.includes('does not exist')) {
+                                console.log('🔄 Trying fallback query without error_message...');
+                                try {
+                                    const fallbackQuery = `INSERT INTO scans(
+                                        container_no, truck_no, scan_time, status, 
+                                        image1_path, image2_path, image3_path, image4_path
+                                    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
+                                    
+                                    const pData = parsed.data;
+                                    const fallbackValues = [
+                                        pData.containerNo, 
+                                        pData.truckNo, 
+                                        pData.scanTime, 
+                                        pData.status, 
+                                        pData.image1_path, 
+                                        pData.image2_path, 
+                                        pData.image3_path, 
+                                        pData.image4_path
+                                    ];
+                                    
+                                    const fallbackRes = await db.query(fallbackQuery, fallbackValues);
+                                    const fallbackScan = fallbackRes.rows[0];
+                                    console.log(`✅ [DB FALLBACK] Data scan disimpan. ID: ${fallbackScan.id}`);
+                                    
+                                    io.emit('new_scan', fallbackScan);
+                                } catch (fallbackError) {
+                                    console.error('❌ Fallback query also failed:', fallbackError);
+                                }
+                            }
                         }
                     }
                     
@@ -976,13 +1096,19 @@ app.get('/', (req, res) => {
             updateConfig: 'PUT /api/config/update',
             export: 'GET /api/export/csv-v2',
             images: 'GET /images/*',
-            deleteScan: 'DELETE /api/scans/:id'
+            deleteScan: 'DELETE /api/scans/:id',
+            debug: {
+                dbSchema: 'GET /api/debug/db-schema',
+                recentScans: 'GET /api/debug/recent-scans',
+                fixSchema: 'POST /api/debug/fix-schema'
+            }
         },
         websocket: {
             new_scan: 'New scan data',
             ftp_update: 'FTP server status update',
             system_activity_update: 'System activity update',
-            scan_deleted: 'Scan deleted event'
+            scan_deleted: 'Scan deleted event',
+            stats_update: 'Statistics update'
         }
     });
 });
@@ -1009,7 +1135,10 @@ app.use((req, res) => {
             'PUT  /api/config/update',
             'GET  /api/export/csv-v2',
             'DELETE /api/scans/:id',
-            'GET  /images/*'
+            'GET  /images/*',
+            'GET  /api/debug/db-schema',
+            'GET  /api/debug/recent-scans',
+            'POST /api/debug/fix-schema'
         ]
     });
 });
@@ -1053,12 +1182,16 @@ server.listen(PORT, () => {
     console.log(`📊   PUT  /api/config/update  - Update konfigurasi`);
     console.log(`📊   GET  /api/export/csv-v2  - Export data ke CSV`);
     console.log(`📊   GET  /images/*           - Serve gambar`);
+    console.log(`📊   GET  /api/debug/db-schema- Debug database schema`);
+    console.log(`📊   GET  /api/debug/recent-scans - Debug recent scans`);
+    console.log(`📊   POST /api/debug/fix-schema - Fix database schema`);
     console.log(`📊 ==========================================`);
     console.log(`🔌 WebSocket Events:`);
     console.log(`🔌   new_scan                - Data scan baru`);
     console.log(`🔌   ftp_update              - Update status FTP`);
     console.log(`🔌   system_activity_update  - Update aktivitas sistem`);
     console.log(`🔌   scan_deleted            - Scan dihapus`);
+    console.log(`🔌   stats_update            - Update statistik`);
     console.log(`🔌 ==========================================`);
     console.log(`👀 Log monitoring: ${fs.existsSync(LOG_FILE_PATH) ? 'AKTIF' : 'NON-AKTIF'}`);
     if (!fs.existsSync(LOG_FILE_PATH)) {
