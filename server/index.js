@@ -7,6 +7,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const path = require('path');
 const ini = require('ini');
+const axios = require('axios');
 
 const { parseLogLine } = require('./logParser');
 const db = require('./db');
@@ -88,7 +89,7 @@ app.get('/api/scans', async (req, res) => {
         
         if (search) {
             queryParams.push(`%${search}%`);
-            whereClauses.push(`(container_no ILIKE $${queryParams.length} OR id::text ILIKE $${queryParams.length})`);
+            whereClauses.push(`(container_no ILIKE $${queryParams.length} OR id_scan ILIKE $${queryParams.length} OR id::text ILIKE $${queryParams.length})`);
         }
         
         if (whereClauses.length > 0) {
@@ -120,6 +121,146 @@ app.get('/api/scans', async (req, res) => {
             success: false,
             error: 'Internal server error',
             message: err.message
+        });
+    }
+});
+
+// =======================================================================
+// === API RESEND DATA KE SERVER MTI ===
+// =======================================================================
+app.post('/api/scans/:id/resend', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        console.log(`🔄 Request resend data untuk scan ID: ${id}`);
+        
+        // 1. Ambil data dari database
+        const query = 'SELECT * FROM scans WHERE id = $1';
+        const result = await db.query(query, [id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Scan not found',
+                message: `Scan with ID ${id} not found`
+            });
+        }
+        
+        const scanData = result.rows[0];
+        
+        // 2. Validasi hanya untuk status OK
+        if (scanData.status !== 'OK') {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid operation',
+                message: 'Resend hanya bisa untuk data dengan status OK'
+            });
+        }
+        
+        // 3. Format data untuk dikirim ke server MTI
+        const mtiPayload = {
+            resultCode: true,
+            resultDesc: "",
+            resultData: {
+                IDX: scanData.id,
+                ID: scanData.id_scan || `scan-${scanData.id}`,
+                PICNO: scanData.id_scan,
+                PATH: "/62001FS03/2025/1015/0304/",
+                SCANTIME: scanData.scan_time,
+                IMAGEFOLDER: new Date(scanData.scan_time).getTime(),
+                TIME_VEH_ENTER: Math.floor(Date.now() / 1000) - 300,
+                TIME_SCANSTART: Math.floor(Date.now() / 1000) - 240,
+                TIME_SCAN_STOP: Math.floor(Date.now() / 1000) - 180,
+                CONTAINER_NO: scanData.container_no,
+                FYCO_PRESENT: scanData.truck_no || "0000000",
+                WORKFLOW: "",
+                UPDATE_TIME: new Date().toISOString().replace('T', ' ').substring(0, 19),
+                RESPON_TPKS_API: "OK",
+                IMAGE1_PATH: scanData.image1_path || "",
+                IMAGE2_PATH: scanData.image2_path || "",
+                IMAGE3_PATH: scanData.image3_path || "",
+                IMAGE4_PATH: scanData.image4_path || "",
+                IMAGE5_PATH: scanData.image5_path || "",
+                IMAGE6_PATH: scanData.image6_path || "",
+                IMAGE7_PATH: "",
+                SCANTIME_START: "",
+                SCANTIME_END: ""
+            }
+        };
+        
+        console.log('📤 Payload untuk resend:', JSON.stringify(mtiPayload, null, 2));
+        
+        // 4. Kirim ke server MTI (gunakan IP dari config)
+        const mtiServerUrl = `http://${ftpConfig.server2_ip || '10.226.62.32'}:8040/services/xRaySby/out`;
+        
+        console.log(`🌐 Mengirim data ke MTI Server: ${mtiServerUrl}`);
+        
+        const response = await axios.post(mtiServerUrl, mtiPayload, {
+            timeout: 10000,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        console.log(`✅ Resend berhasil! Response dari MTI:`, response.data);
+        
+        // 5. Update status di database untuk tracking
+        const updateQuery = `
+            UPDATE scans 
+            SET resend_count = COALESCE(resend_count, 0) + 1,
+                last_resend_time = NOW(),
+                resend_status = 'SUCCESS'
+            WHERE id = $1
+        `;
+        await db.query(updateQuery, [id]);
+        
+        // 6. Kirim notifikasi real-time
+        io.emit('resend_success', {
+            scanId: id,
+            containerNo: scanData.container_no,
+            timestamp: new Date().toISOString(),
+            response: response.data
+        });
+        
+        res.json({
+            success: true,
+            message: 'Data berhasil dikirim ulang ke server MTI',
+            scanId: id,
+            containerNo: scanData.container_no,
+            mtiResponse: response.data,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (err) {
+        console.error("❌ Error dalam resend data:", err);
+        
+        // Update status error di database
+        if (req.params.id) {
+            try {
+                const updateQuery = `
+                    UPDATE scans 
+                    SET resend_status = 'FAILED',
+                        error_message = $1
+                    WHERE id = $2
+                `;
+                await db.query(updateQuery, [err.message, req.params.id]);
+            } catch (updateError) {
+                console.error('❌ Gagal update status error:', updateError);
+            }
+        }
+        
+        // Kirim notifikasi error real-time
+        io.emit('resend_failed', {
+            scanId: req.params.id,
+            error: err.message,
+            timestamp: new Date().toISOString()
+        });
+        
+        res.status(500).json({ 
+            success: false,
+            error: 'Gagal mengirim ulang data',
+            message: err.message,
+            details: err.response?.data || 'Tidak ada response dari server MTI'
         });
     }
 });
@@ -495,7 +636,7 @@ app.get('/api/export/csv-v2', async (req, res) => {
         
         if (search) {
             queryParams.push(`%${search}%`);
-            whereClauses.push(`(container_no ILIKE $${queryParams.length} OR id::text ILIKE $${queryParams.length})`);
+            whereClauses.push(`(container_no ILIKE $${queryParams.length} OR id_scan ILIKE $${queryParams.length} OR id::text ILIKE $${queryParams.length})`);
         }
         
         if (whereClauses.length > 0) {
@@ -540,7 +681,7 @@ app.get('/api/export/csv-v2', async (req, res) => {
         data.forEach((item, index) => {
             const row = [
                 index + 1,
-                `"${item.id}"`,
+                `"${item.id_scan || item.id}"`,
                 `"${item.container_no || '-'}"`,
                 `"${item.truck_no || '-'}"`,
                 `"${item.scan_time ? new Date(item.scan_time).toLocaleString('id-ID') : '-'}"`,
@@ -707,7 +848,13 @@ app.post('/api/debug/fix-schema', async (req, res) => {
         // Tambahkan kolom error_message jika belum ada
         await db.query(`
             ALTER TABLE scans 
-            ADD COLUMN IF NOT EXISTS error_message TEXT
+            ADD COLUMN IF NOT EXISTS error_message TEXT,
+            ADD COLUMN IF NOT EXISTS id_scan VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS resend_count INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS last_resend_time TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS resend_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS image5_path TEXT,
+            ADD COLUMN IF NOT EXISTS image6_path TEXT
         `);
         
         res.json({
@@ -841,6 +988,7 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                 
                                 // Debug data yang akan disimpan
                                 console.log('💾 Preparing to save scan data:', {
+                                    idScan: pData.idScan,
                                     containerNo: pData.containerNo,
                                     truckNo: pData.truckNo,
                                     scanTime: pData.scanTime,
@@ -848,13 +996,14 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     hasImages: !!(pData.image1_path || pData.image2_path || pData.image3_path || pData.image4_path)
                                 });
 
+                                // QUERY YANG DIPERBAIKI - DENGAN ID_SCAN
                                 const query = `INSERT INTO scans(
                                     id_scan, container_no, truck_no, scan_time, status, 
                                     image1_path, image2_path, image3_path, image4_path, image5_path, image6_path
                                 ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`;
-
+                                
                                 const values = [
-                                    pData.idScan,
+                                    pData.idScan, // ID Scan dari log line
                                     pData.containerNo, 
                                     pData.truckNo, 
                                     pData.scanTime, 
@@ -1002,12 +1151,13 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                 console.log('🔄 Trying fallback query without error_message...');
                                 try {
                                     const fallbackQuery = `INSERT INTO scans(
-                                        container_no, truck_no, scan_time, status, 
+                                        id_scan, container_no, truck_no, scan_time, status, 
                                         image1_path, image2_path, image3_path, image4_path
-                                    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
+                                    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`;
                                     
                                     const pData = parsed.data;
                                     const fallbackValues = [
+                                        pData.idScan,
                                         pData.containerNo, 
                                         pData.truckNo, 
                                         pData.scanTime, 
@@ -1089,6 +1239,7 @@ app.get('/', (req, res) => {
             health: 'GET /api/health',
             scans: 'GET /api/scans',
             scanDetail: 'GET /api/scans/:id',
+            resend: 'POST /api/scans/:id/resend',
             stats: 'GET /api/stats',
             statsDaily: 'GET /api/stats/daily',
             statsSummary: 'GET /api/stats/summary',
@@ -1109,7 +1260,9 @@ app.get('/', (req, res) => {
             ftp_update: 'FTP server status update',
             system_activity_update: 'System activity update',
             scan_deleted: 'Scan deleted event',
-            stats_update: 'Statistics update'
+            stats_update: 'Statistics update',
+            resend_success: 'Resend success event',
+            resend_failed: 'Resend failed event'
         }
     });
 });
@@ -1128,6 +1281,7 @@ app.use((req, res) => {
             'GET  /api/health',
             'GET  /api/scans',
             'GET  /api/scans/:id',
+            'POST /api/scans/:id/resend',
             'GET  /api/stats',
             'GET  /api/stats/daily',
             'GET  /api/stats/summary',
@@ -1174,6 +1328,7 @@ server.listen(PORT, () => {
     console.log(`📊   GET  /api/health         - Health check`);
     console.log(`📊   GET  /api/scans          - Data scans dengan pagination`);
     console.log(`📊   GET  /api/scans/:id      - Detail scan by ID`);
+    console.log(`📊   POST /api/scans/:id/resend - Resend data ke MTI`);
     console.log(`📊   DELETE /api/scans/:id    - Delete scan`);
     console.log(`📊   GET  /api/stats          - Statistik dasar`);
     console.log(`📊   GET  /api/stats/daily    - Statistik harian (30 hari)`);
@@ -1193,6 +1348,8 @@ server.listen(PORT, () => {
     console.log(`🔌   system_activity_update  - Update aktivitas sistem`);
     console.log(`🔌   scan_deleted            - Scan dihapus`);
     console.log(`🔌   stats_update            - Update statistik`);
+    console.log(`🔌   resend_success          - Resend berhasil`);
+    console.log(`🔌   resend_failed           - Resend gagal`);
     console.log(`🔌 ==========================================`);
     console.log(`👀 Log monitoring: ${fs.existsSync(LOG_FILE_PATH) ? 'AKTIF' : 'NON-AKTIF'}`);
     if (!fs.existsSync(LOG_FILE_PATH)) {
