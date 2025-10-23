@@ -1,6 +1,10 @@
 const parseLogLine = (line) => {
   console.log('🔍 Parsing line:', line.substring(0, 200) + '...');
 
+  // Extract ID Scan dari log line (sebelum response JSON)
+  const idScanMatch = line.match(/center response:([^,]+),/);
+  const idScan = idScanMatch ? idScanMatch[1].trim() : null;
+
   // 1. Cek untuk log FTP Upload
   if ((line.includes('FTP') && line.includes('UPLOAD')) || 
       (line.includes('ftp') && line.includes('upload')) ||
@@ -20,8 +24,7 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 2. Cek untuk response JSON yang berisi data scan - PATTERN DIPERBAIKI
-  // Pattern yang lebih fleksibel
+  // 2. Cek untuk response JSON yang berisi data scan
   const responsePatterns = [
     /center response:.*?response code: 200,response text:\s*(\{.*\})/i,
     /response text:\s*(\{.*\})/i,
@@ -35,7 +38,6 @@ const parseLogLine = (line) => {
       
       let jsonString = match[1] || line;
       
-      // Jika pattern ketiga, cari JSON object lengkap
       if (pattern === responsePatterns[2]) {
         const jsonMatch = line.match(/\{.*\}/);
         if (jsonMatch) {
@@ -59,6 +61,7 @@ const parseLogLine = (line) => {
           return {
             type: 'SCAN',
             data: {
+              idScan: idScan, // Gunakan ID dari log line
               containerNo: 'N/A',
               truckNo: 'N/A',
               scanTime: new Date().toISOString(),
@@ -81,6 +84,7 @@ const parseLogLine = (line) => {
           return {
             type: 'SCAN',
             data: {
+              idScan: idScan || resultData.PICNO || 'N/A', // Prioritaskan ID dari log line
               containerNo: resultData.CONTAINER_NO || 'N/A',
               truckNo: resultData.FYCO_PRESENT || 'N/A',
               scanTime: resultData.SCANTIME || new Date().toISOString(),
@@ -89,6 +93,9 @@ const parseLogLine = (line) => {
               image2_path: resultData.IMAGE2_PATH || null,
               image3_path: resultData.IMAGE3_PATH || null,
               image4_path: resultData.IMAGE4_PATH || null,
+              // Tambahkan image5 dan image6 jika ada
+              image5_path: resultData.IMAGE5_PATH || null,
+              image6_path: resultData.IMAGE6_PATH || null,
               rawData: resultData
             }
           };
@@ -100,6 +107,7 @@ const parseLogLine = (line) => {
           return {
             type: 'SCAN',
             data: {
+              idScan: idScan || 'N/A',
               containerNo: 'N/A',
               truckNo: 'N/A',
               scanTime: new Date().toISOString(),
@@ -115,7 +123,7 @@ const parseLogLine = (line) => {
 
       } catch (error) {
         console.error('❌ JSON parse error:', error.message);
-        continue; // Coba pattern berikutnya
+        continue;
       }
     }
   }
@@ -129,15 +137,14 @@ const parseLogLine = (line) => {
       
       const data = JSON.parse(jsonString);
       
-      // Cek jika ini adalah struktur scan data
       if (data.resultCode !== undefined) {
         console.log('🔄 Processing via fallback JSON');
         
-        // Handle NOK case
         if (data.resultCode === false) {
           return {
             type: 'SCAN',
             data: {
+              idScan: idScan,
               containerNo: 'N/A',
               truckNo: 'N/A',
               scanTime: new Date().toISOString(),
@@ -152,12 +159,12 @@ const parseLogLine = (line) => {
           };
         }
         
-        // Handle OK case dengan resultData
         if (data.resultCode === true && data.resultData && typeof data.resultData === 'object') {
           const resultData = data.resultData;
           return {
             type: 'SCAN',
             data: {
+              idScan: idScan || resultData.PICNO || 'N/A',
               containerNo: resultData.CONTAINER_NO || 'N/A',
               truckNo: resultData.FYCO_PRESENT || 'N/A',
               scanTime: resultData.SCANTIME || new Date().toISOString(),
@@ -166,6 +173,8 @@ const parseLogLine = (line) => {
               image2_path: resultData.IMAGE2_PATH || null,
               image3_path: resultData.IMAGE3_PATH || null,
               image4_path: resultData.IMAGE4_PATH || null,
+              image5_path: resultData.IMAGE5_PATH || null,
+              image6_path: resultData.IMAGE6_PATH || null,
               rawData: resultData
             }
           };
