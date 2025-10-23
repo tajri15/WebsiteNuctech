@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col, message } from 'antd';
+import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col, message, Descriptions, Badge } from 'antd';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined } from '@ant-design/icons';
+import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined, ExclamationCircleOutlined, FileImageOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
@@ -172,7 +172,18 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
     setIsModalVisible(true);
   };
 
-  const columns = [
+  // Hitung jumlah gambar yang ada
+  const getImageCount = (record) => {
+    if (record.status === 'NOK') return 0;
+    let count = 0;
+    for (let i = 1; i <= 6; i++) {
+      if (record[`image${i}_path`]) count++;
+    }
+    return count;
+  };
+
+  // Kolom untuk OK dan All
+  const okColumns = [
     {
       title: 'NO.',
       key: 'no',
@@ -185,12 +196,12 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
     },
     {
       title: 'ID SCAN',
-      dataIndex: 'id',
-      key: 'id',
+      dataIndex: 'id_scan', // Ganti dari 'id' ke 'id_scan'
+      key: 'id_scan',
       width: 200,
       render: (text) => (
         <Text style={{ fontFamily: 'monospace', fontSize: '12px' }}>
-          {text}
+          {text || 'N/A'}
         </Text>
       ),
     },
@@ -201,7 +212,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       width: 150,
       render: (text) => (
         <Text strong style={{ color: '#1890ff' }}>
-          {text}
+          {text || '-'}
         </Text>
       ),
     },
@@ -262,16 +273,16 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       key: 'image_count',
       width: 120,
       render: (_, record) => {
-        const count = [
-          record.image1_path,
-          record.image2_path,
-          record.image3_path,
-          record.image4_path
-        ].filter(Boolean).length;
+        const count = getImageCount(record);
         return (
-          <Tag color="blue" style={{ textAlign: 'center', minWidth: '30px' }}>
-            {count}
-          </Tag>
+          <Badge 
+            count={count} 
+            showZero 
+            style={{ 
+              backgroundColor: count > 0 ? '#52c41a' : '#d9d9d9',
+              fontSize: '12px'
+            }}
+          />
         );
       },
     },
@@ -315,6 +326,325 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       ),
     },
   ];
+
+  // Kolom khusus untuk NOK (tanpa jumlah gambar dan update time)
+  const nokColumns = [
+    {
+      title: 'NO.',
+      key: 'no',
+      width: 60,
+      render: (_, record, index) => {
+        const current = pagination.current || 1;
+        const pageSize = pagination.pageSize || 10;
+        return (current - 1) * pageSize + index + 1;
+      },
+    },
+    {
+      title: 'ID SCAN',
+      dataIndex: 'id_scan', // Ganti dari 'id' ke 'id_scan'
+      key: 'id_scan',
+      width: 200,
+      render: (text) => (
+        <Text style={{ fontFamily: 'monospace', fontSize: '12px' }}>
+          {text || 'N/A'}
+        </Text>
+      ),
+    },
+    {
+      title: 'NO. CONTAINER',
+      dataIndex: 'container_no',
+      key: 'container_no',
+      width: 150,
+      render: (text) => (
+        <Text strong style={{ color: '#1890ff' }}>
+          {text || '-'}
+        </Text>
+      ),
+    },
+    {
+      title: 'JAM SCAN',
+      dataIndex: 'scan_time',
+      key: 'scan_time',
+      width: 120,
+      render: (text) => (
+        <Text style={{ fontSize: '12px' }}>
+          {text ? new Date(text).toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          }) : '-'}
+        </Text>
+      ),
+      sorter: (a, b) => new Date(a.scan_time) - new Date(b.scan_time),
+    },
+    {
+      title: 'SCAN TIME',
+      dataIndex: 'scan_time',
+      key: 'scan_time_full',
+      width: 180,
+      render: (text) => (
+        <Text style={{ fontSize: '12px' }}>
+          {text ? new Date(text).toLocaleString('id-ID', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          }) : '-'}
+        </Text>
+      ),
+    },
+    {
+      title: 'STATUS',
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (status) => (
+        <Tag 
+          color="red" 
+          style={{ 
+            fontWeight: 'bold',
+            textAlign: 'center',
+            minWidth: '50px'
+          }}
+        >
+          {status}
+        </Tag>
+      ),
+    },
+    {
+      title: 'DETAIL',
+      key: 'detail',
+      width: 100,
+      render: (_, record) => (
+        <Button
+          type="primary"
+          size="small"
+          icon={<ExclamationCircleOutlined />}
+          onClick={() => showImageModal(record)}
+          style={{ 
+            fontSize: '12px',
+            backgroundColor: '#ff4d4f',
+            borderColor: '#ff4d4f'
+          }}
+          danger
+        >
+          Detail
+        </Button>
+      ),
+    },
+  ];
+
+  const columns = filterStatus === 'nok' ? nokColumns : okColumns;
+
+  // Modal untuk detail OK
+  const renderOkDetailModal = () => (
+    <Modal
+      title={
+        <div>
+          <Text strong>Scan Details - </Text>
+          <Tag color="green">OK</Tag>
+          <Text strong> Container: </Text>
+          <Text style={{ color: '#1890ff' }}>{selectedRecord.container_no}</Text>
+        </div>
+      }
+      visible={isModalVisible}
+      onCancel={() => setIsModalVisible(false)}
+      footer={[
+        <Button key="close" onClick={() => setIsModalVisible(false)}>
+          Tutup
+        </Button>
+      ]}
+      width={1000}
+      style={{ top: 20 }}
+    >
+      <Descriptions bordered column={2} size="small" style={{ marginBottom: 20 }}>
+        <Descriptions.Item label="ID Scan" span={2}>
+          <Text code>{selectedRecord.id_scan}</Text>
+        </Descriptions.Item>
+        <Descriptions.Item label="Container No">
+          {selectedRecord.container_no}
+        </Descriptions.Item>
+        <Descriptions.Item label="Truck No">
+          {selectedRecord.truck_no || '-'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Scan Time">
+          {selectedRecord.scan_time ? new Date(selectedRecord.scan_time).toLocaleString('id-ID') : '-'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Update Time">
+          {selectedRecord.updated_at ? new Date(selectedRecord.updated_at).toLocaleString('id-ID') : '-'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Status">
+          <Tag color="green">OK</Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="Jumlah Gambar">
+          <Badge count={getImageCount(selectedRecord)} showZero />
+        </Descriptions.Item>
+      </Descriptions>
+
+      <Title level={5}>Gambar:</Title>
+      <Image.PreviewGroup>
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: 16,
+          padding: '16px 0'
+        }}>
+          {[1, 2, 3, 4, 5, 6].map(i => (
+            selectedRecord[`image${i}_path`] && (
+              <div key={i} style={{ textAlign: 'center', border: '1px solid #d9d9d9', borderRadius: 8, padding: 8 }}>
+                <Image 
+                  width={180} 
+                  height={135}
+                  style={{ 
+                    objectFit: 'cover',
+                    borderRadius: 4,
+                  }}
+                  src={`http://localhost:5000/images${selectedRecord[`image${i}_path`]}`}
+                  placeholder={
+                    <div style={{ 
+                      width: 180, 
+                      height: 135, 
+                      background: '#f5f5f5',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: 4
+                    }}>
+                      <Text type="secondary">Loading...</Text>
+                    </div>
+                  }
+                />
+                <Text style={{ display: 'block', marginTop: 8, fontSize: '12px' }}>
+                  <FileImageOutlined /> Image {i}
+                </Text>
+              </div>
+            )
+          ))}
+        </div>
+      </Image.PreviewGroup>
+      
+      {getImageCount(selectedRecord) === 0 && (
+        <div style={{ 
+          textAlign: 'center', 
+          padding: '40px 0',
+          color: '#999'
+        }}>
+          <Text>No images available for this record</Text>
+        </div>
+      )}
+    </Modal>
+  );
+
+  // Modal untuk detail NOK (sesuai gambar)
+  const renderNokDetailModal = () => (
+    <Modal
+      title="NOK Scan Details"
+      visible={isModalVisible}
+      onCancel={() => setIsModalVisible(false)}
+      footer={[
+        <Button key="close" onClick={() => setIsModalVisible(false)}>
+          Tutup
+        </Button>
+      ]}
+      width={700}
+    >
+      {selectedRecord && (
+        <div style={{ fontFamily: 'Arial, sans-serif' }}>
+          {/* CORE INFORMATION */}
+          <div style={{ 
+            backgroundColor: '#f8f9fa', 
+            padding: '16px', 
+            borderRadius: '8px',
+            marginBottom: '16px',
+            borderLeft: '4px solid #dc3545'
+          }}>
+            <h3 style={{ color: '#dc3545', margin: '0 0 12px 0', fontSize: '16px' }}>CORE INFORMATION</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+              <strong>ID Scan:</strong>
+              <code style={{ background: '#fff', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
+                {selectedRecord.id_scan}
+              </code>
+              
+              <strong>Container No:</strong>
+              <span>{selectedRecord.container_no || 'N/A'}</span>
+              
+              <strong>Scan Time:</strong>
+              <span>{selectedRecord.scan_time ? new Date(selectedRecord.scan_time).toLocaleString('id-ID') : 'N/A'}</span>
+              
+              <strong>Status:</strong>
+              <Tag color="red">NOK</Tag>
+            </div>
+          </div>
+
+          {/* TIMING DETAILS */}
+          <div style={{ 
+            backgroundColor: '#fff3cd', 
+            padding: '16px', 
+            borderRadius: '8px',
+            marginBottom: '16px',
+            borderLeft: '4px solid #ffc107'
+          }}>
+            <h3 style={{ color: '#856404', margin: '0 0 12px 0', fontSize: '16px' }}>TIMING DETAILS</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+              <strong>Update Time:</strong>
+              <span>{selectedRecord.updated_at ? new Date(selectedRecord.updated_at).toLocaleString('id-ID') : 'N/A'}</span>
+              
+              <strong>Time Difference:</strong>
+              <span>00:05:09</span>
+              
+              <strong>Image Count:</strong>
+              <span>0</span>
+              
+              <strong>Task Time:</strong>
+              <span>N/A</span>
+              
+              <strong>Retry Count:</strong>
+              <span>N/A</span>
+            </div>
+          </div>
+
+          {/* IMAGE INFORMATION */}
+          <div style={{ 
+            backgroundColor: '#e2e3e5', 
+            padding: '16px', 
+            borderRadius: '8px',
+            marginBottom: '16px'
+          }}>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>IMAGE INFORMATION</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+              <strong>Image Path:</strong>
+              <span style={{ color: '#6c757d' }}>N/A</span>
+            </div>
+          </div>
+
+          {/* ADDITIONAL RAW DATA */}
+          <div style={{ 
+            backgroundColor: '#f8f9fa', 
+            padding: '16px', 
+            borderRadius: '8px',
+            border: '1px solid #dee2e6'
+          }}>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>ADDITIONAL RAW DATA</h3>
+            <div style={{ fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.5' }}>
+              <div>| CONTAINER_NO | {selectedRecord.container_no || 'N/A'} |</div>
+              <div>| container_no | {selectedRecord.container_no || 'N/A'} |</div>
+              <div>| image_count | 0 |</div>
+              <br />
+              <div>log_timestamp  {selectedRecord.scan_time ? new Date(selectedRecord.scan_time).toLocaleString('id-ID') : 'N/A'}</div>
+              <div>post_url  http://10.226.52.32:8040/services/xRaySby/out</div>
+              <div>resend_http_status  200</div>
+              <br />
+              <div>resend_response_text  {"{\"resultCode\":false,\"resultDesc\":\"java.lang.ArrayListOutOfBoundsException:1\",\"resultData\":\".\"}"}</div>
+              <br />
+              <div>resend_status  FAILED</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
 
   return (
     <div style={{ padding: '24px' }}>
@@ -414,7 +744,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
             pageSizeOptions: ['10', '20', '50', '100'],
           }}
           onChange={handleTableChange}
-          scroll={{ x: 1300 }}
+          scroll={{ x: filterStatus === 'nok' ? 900 : 1100 }}
           size="middle"
           style={{ 
             borderRadius: 8,
@@ -423,122 +753,8 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
         />
       </Card>
       
-      {selectedRecord && (
-        <Modal
-          title={
-            <div>
-              <Text strong>Detail Images for Container: </Text>
-              <Text style={{ color: '#1890ff' }}>{selectedRecord.container_no}</Text>
-            </div>
-          }
-          visible={isModalVisible}
-          onCancel={() => setIsModalVisible(false)}
-          footer={null}
-          width={1000}
-          style={{ top: 20 }}
-        >
-          <Image.PreviewGroup>
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'space-around', 
-              flexWrap: 'wrap',
-              gap: 16,
-              padding: '16px 0'
-            }}>
-              {selectedRecord.image1_path && (
-                <div style={{ textAlign: 'center' }}>
-                  <Image 
-                    width={200} 
-                    height={150}
-                    style={{ 
-                      objectFit: 'cover',
-                      borderRadius: 8,
-                      border: '1px solid #d9d9d9'
-                    }}
-                    src={`http://localhost:5000/images${selectedRecord.image1_path}`}
-                    placeholder={
-                      <div style={{ 
-                        width: 200, 
-                        height: 150, 
-                        background: '#f5f5f5',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        borderRadius: 8
-                      }}>
-                        <Text type="secondary">Loading...</Text>
-                      </div>
-                    }
-                  />
-                  <Text style={{ display: 'block', marginTop: 8, fontSize: '12px' }}>
-                    Image 1
-                  </Text>
-                </div>
-              )}
-              {selectedRecord.image2_path && (
-                <div style={{ textAlign: 'center' }}>
-                  <Image 
-                    width={200} 
-                    height={150}
-                    style={{ 
-                      objectFit: 'cover',
-                      borderRadius: 8,
-                      border: '1px solid #d9d9d9'
-                    }}
-                    src={`http://localhost:5000/images${selectedRecord.image2_path}`}
-                  />
-                  <Text style={{ display: 'block', marginTop: 8, fontSize: '12px' }}>
-                    Image 2
-                  </Text>
-                </div>
-              )}
-              {selectedRecord.image3_path && (
-                <div style={{ textAlign: 'center' }}>
-                  <Image 
-                    width={200} 
-                    height={150}
-                    style={{ 
-                      objectFit: 'cover',
-                      borderRadius: 8,
-                      border: '1px solid #d9d9d9'
-                    }}
-                    src={`http://localhost:5000/images${selectedRecord.image3_path}`}
-                  />
-                  <Text style={{ display: 'block', marginTop: 8, fontSize: '12px' }}>
-                    Image 3
-                  </Text>
-                </div>
-              )}
-              {selectedRecord.image4_path && (
-                <div style={{ textAlign: 'center' }}>
-                  <Image 
-                    width={200} 
-                    height={150}
-                    style={{ 
-                      objectFit: 'cover',
-                      borderRadius: 8,
-                      border: '1px solid #d9d9d9'
-                    }}
-                    src={`http://localhost:5000/images${selectedRecord.image4_path}`}
-                  />
-                  <Text style={{ display: 'block', marginTop: 8, fontSize: '12px' }}>
-                    Image 4
-                  </Text>
-                </div>
-              )}
-            </div>
-          </Image.PreviewGroup>
-          {!selectedRecord.image1_path && !selectedRecord.image2_path && 
-           !selectedRecord.image3_path && !selectedRecord.image4_path && (
-            <div style={{ 
-              textAlign: 'center', 
-              padding: '40px 0',
-              color: '#999'
-            }}>
-              <Text>No images available for this record</Text>
-            </div>
-          )}
-        </Modal>
+      {selectedRecord && isModalVisible && (
+        filterStatus === 'nok' ? renderNokDetailModal() : renderOkDetailModal()
       )}
     </div>
   );

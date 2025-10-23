@@ -848,13 +848,13 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     hasImages: !!(pData.image1_path || pData.image2_path || pData.image3_path || pData.image4_path)
                                 });
 
-                                // QUERY YANG DIPERBAIKI - SESUAI SCHEMA DATABASE
                                 const query = `INSERT INTO scans(
-                                    container_no, truck_no, scan_time, status, 
-                                    image1_path, image2_path, image3_path, image4_path
-                                ) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
-                                
+                                    id_scan, container_no, truck_no, scan_time, status, 
+                                    image1_path, image2_path, image3_path, image4_path, image5_path, image6_path
+                                ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`;
+
                                 const values = [
+                                    pData.idScan,
                                     pData.containerNo, 
                                     pData.truckNo, 
                                     pData.scanTime, 
@@ -862,8 +862,9 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     pData.image1_path, 
                                     pData.image2_path, 
                                     pData.image3_path, 
-                                    pData.image4_path
-                                    // error_message dihapus dari values karena tidak ada di schema
+                                    pData.image4_path,
+                                    pData.image5_path || null,
+                                    pData.image6_path || null
                                 ];
                                 
                                 console.log('🗄️ Executing database query...');
