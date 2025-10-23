@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col, message, Descriptions, Badge } from 'antd';
+import { Table, Tag, Modal, Image, Button, Input, Card, Typography, Select, Row, Col, message, Descriptions, Badge, Tooltip } from 'antd';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined, ExclamationCircleOutlined, FileImageOutlined } from '@ant-design/icons';
+import { EyeOutlined, SearchOutlined, ExportOutlined, SyncOutlined, ExclamationCircleOutlined, FileImageOutlined, SendOutlined, LoadingOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
@@ -14,6 +14,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: 10,
@@ -24,6 +25,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
   const [searchText, setSearchText] = useState('');
   const [transmissionFilter, setTransmissionFilter] = useState('all');
   const [searchInputValue, setSearchInputValue] = useState('');
+  const [resendStatus, setResendStatus] = useState({});
 
   // Fungsi fetch data
   const fetchData = async (params = {}) => {
@@ -119,7 +121,45 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
   };
 
   // =======================================================================
-  // === FUNGSI EXPORT CSV YANG DIPERBAIKI (FIXED) ===
+  // === FUNGSI RESEND DATA KE SERVER MTI ===
+  // =======================================================================
+  const handleResend = async (record) => {
+    try {
+      setResendLoading(true);
+      setResendStatus(prev => ({ ...prev, [record.id]: 'loading' }));
+      
+      message.loading(`Mengirim ulang data untuk container ${record.container_no}...`, 0);
+      
+      const response = await axios.post(`http://localhost:5000/api/scans/${record.id}/resend`);
+      
+      message.destroy();
+      message.success('Data berhasil dikirim ulang ke server MTI!');
+      
+      setResendStatus(prev => ({ ...prev, [record.id]: 'success' }));
+      
+      // Reset status setelah 3 detik
+      setTimeout(() => {
+        setResendStatus(prev => ({ ...prev, [record.id]: null }));
+      }, 3000);
+      
+    } catch (error) {
+      console.error('❌ Gagal resend data:', error);
+      message.destroy();
+      message.error(`Gagal mengirim ulang: ${error.response?.data?.message || error.message}`);
+      
+      setResendStatus(prev => ({ ...prev, [record.id]: 'error' }));
+      
+      // Reset status error setelah 5 detik
+      setTimeout(() => {
+        setResendStatus(prev => ({ ...prev, [record.id]: null }));
+      }, 5000);
+    } finally {
+      setResendLoading(false);
+    }
+  };
+
+  // =======================================================================
+  // === FUNGSI EXPORT CSV ===
   // =======================================================================
   const handleExport = async () => {
     try {
@@ -138,14 +178,12 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
         params.append('search', searchText);
       }
 
-      // Gunakan endpoint v2
       const exportUrl = `http://localhost:5000/api/export/csv-v2?${params.toString()}`;
       
-      // Simple fetch dengan download otomatis
       const link = document.createElement('a');
       link.href = exportUrl;
       link.target = '_blank';
-      link.download = 'temp.csv'; // Browser akan override ini dengan nama dari server
+      link.download = 'temp.csv';
       
       document.body.appendChild(link);
       link.click();
@@ -196,7 +234,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
     },
     {
       title: 'ID SCAN',
-      dataIndex: 'id_scan', // Ganti dari 'id' ke 'id_scan'
+      dataIndex: 'id_scan',
       key: 'id_scan',
       width: 200,
       render: (text) => (
@@ -310,19 +348,51 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       onFilter: (value, record) => record.status === value,
     },
     {
-      title: 'DETAIL',
-      key: 'detail',
-      width: 100,
+      title: 'AKSI',
+      key: 'action',
+      width: 180,
       render: (_, record) => (
-        <Button
-          type="primary"
-          size="small"
-          icon={<EyeOutlined />}
-          onClick={() => showImageModal(record)}
-          style={{ fontSize: '12px' }}
-        >
-          Detail
-        </Button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <Tooltip title="Lihat detail">
+            <Button
+              type="primary"
+              size="small"
+              icon={<EyeOutlined />}
+              onClick={() => showImageModal(record)}
+              style={{ fontSize: '12px' }}
+            >
+              Detail
+            </Button>
+          </Tooltip>
+          
+          {/* Tombol Resend hanya untuk OK */}
+          {record.status === 'OK' && (
+            <Tooltip title="Kirim ulang data ke server MTI">
+              <Button
+                type="default"
+                size="small"
+                icon={
+                  resendStatus[record.id] === 'loading' ? 
+                  <LoadingOutlined /> : 
+                  <SendOutlined />
+                }
+                onClick={() => handleResend(record)}
+                loading={resendStatus[record.id] === 'loading'}
+                style={{ 
+                  fontSize: '12px',
+                  borderColor: resendStatus[record.id] === 'success' ? '#52c41a' : 
+                             resendStatus[record.id] === 'error' ? '#ff4d4f' : '#d9d9d9',
+                  color: resendStatus[record.id] === 'success' ? '#52c41a' : 
+                        resendStatus[record.id] === 'error' ? '#ff4d4f' : 'inherit'
+                }}
+              >
+                {resendStatus[record.id] === 'loading' ? 'Sending' : 
+                 resendStatus[record.id] === 'success' ? 'Sent' :
+                 resendStatus[record.id] === 'error' ? 'Failed' : 'Resend'}
+              </Button>
+            </Tooltip>
+          )}
+        </div>
       ),
     },
   ];
@@ -341,7 +411,7 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
     },
     {
       title: 'ID SCAN',
-      dataIndex: 'id_scan', // Ganti dari 'id' ke 'id_scan'
+      dataIndex: 'id_scan',
       key: 'id_scan',
       width: 200,
       render: (text) => (
@@ -414,24 +484,26 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       ),
     },
     {
-      title: 'DETAIL',
-      key: 'detail',
+      title: 'AKSI',
+      key: 'action',
       width: 100,
       render: (_, record) => (
-        <Button
-          type="primary"
-          size="small"
-          icon={<ExclamationCircleOutlined />}
-          onClick={() => showImageModal(record)}
-          style={{ 
-            fontSize: '12px',
-            backgroundColor: '#ff4d4f',
-            borderColor: '#ff4d4f'
-          }}
-          danger
-        >
-          Detail
-        </Button>
+        <Tooltip title="Lihat detail">
+          <Button
+            type="primary"
+            size="small"
+            icon={<ExclamationCircleOutlined />}
+            onClick={() => showImageModal(record)}
+            style={{ 
+              fontSize: '12px',
+              backgroundColor: '#ff4d4f',
+              borderColor: '#ff4d4f'
+            }}
+            danger
+          >
+            Detail
+          </Button>
+        </Tooltip>
       ),
     },
   ];
@@ -452,6 +524,19 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
       visible={isModalVisible}
       onCancel={() => setIsModalVisible(false)}
       footer={[
+        <Button 
+          key="resend" 
+          type="primary" 
+          icon={<SendOutlined />}
+          loading={resendLoading}
+          onClick={() => handleResend(selectedRecord)}
+          style={{ 
+            backgroundColor: '#1890ff',
+            borderColor: '#1890ff'
+          }}
+        >
+          Resend ke Server MTI
+        </Button>,
         <Button key="close" onClick={() => setIsModalVisible(false)}>
           Tutup
         </Button>
@@ -532,6 +617,24 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
           color: '#999'
         }}>
           <Text>No images available for this record</Text>
+        </div>
+      )}
+
+      {/* Info resend history */}
+      {selectedRecord.resend_count > 0 && (
+        <div style={{ 
+          marginTop: 16, 
+          padding: 12, 
+          backgroundColor: '#f6ffed', 
+          border: '1px solid #b7eb8f',
+          borderRadius: 6
+        }}>
+          <Text type="secondary">
+            <SendOutlined /> Data telah dikirim ulang {selectedRecord.resend_count} kali
+            {selectedRecord.last_resend_time && (
+              <> (terakhir: {new Date(selectedRecord.last_resend_time).toLocaleString('id-ID')})</>
+            )}
+          </Text>
         </div>
       )}
     </Modal>

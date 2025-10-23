@@ -25,7 +25,7 @@ const DetailLogOk = () => {
           marginBottom: 24,
           borderRadius: 12,
           border: '1px solid #d9d9d9',
-          background: '#fafafa'
+          background: '#f6ffed'
         }}
         bodyStyle={{ padding: '16px 24px' }}
       >
@@ -45,7 +45,7 @@ const DetailLogOk = () => {
             </Tag>
           </div>
           <Text type="secondary" style={{ fontSize: '14px' }}>
-            Showing only successful transactions
+            Showing only successful transactions with resend capability
           </Text>
         </div>
       </Card>
