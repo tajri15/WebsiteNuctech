@@ -28,193 +28,77 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 2. PATTERN UTAMA UNTUK RESPONSE NOK & OK
-  const responsePattern = /center response:.*?response text:\s*(\{.*?\})/i;
-  const responseMatch = line.match(responsePattern);
-  
-  if (responseMatch) {
-    const jsonString = responseMatch[1];
-    console.log('✅ Found response JSON:', jsonString);
-    
-    try {
-      const data = JSON.parse(jsonString);
-      console.log('📋 JSON parsed successfully - resultCode:', data.resultCode);
+  // 2. PATTERN UTAMA - Cari response JSON dengan berbagai pattern
+  const responsePatterns = [
+    /center response:.*?response text:\s*(\{.*?})\s*$/i,  // Pattern utama
+    /response text:\s*(\{.*?})\s*$/i,  // Fallback 1
+    /(\{"resultCode":(true|false).*?})/i  // Fallback 2
+  ];
 
-      // 🚨 HANDLE NOK CASE - resultCode: false
-      if (data.resultCode === false) {
-        console.log('🔴 PROCESSING NOK SCAN - ID:', idScan);
-        console.log('🔴 Error Description:', data.resultDesc);
+  for (const pattern of responsePatterns) {
+    const match = line.match(pattern);
+    if (match) {
+      let jsonString = match[1];
+      console.log('✅ Pattern matched:', pattern.toString());
+      console.log('📋 Raw JSON string:', jsonString);
+
+      try {
+        // Coba parse JSON langsung
+        const data = JSON.parse(jsonString);
+        console.log('✅ JSON parsed successfully - resultCode:', data.resultCode);
+
+        return processScanData(data, idScan, logTimestamp);
+
+      } catch (parseError) {
+        console.log('⚠️ First parse failed, trying to fix JSON...');
         
-        return {
-          type: 'SCAN',
-          data: {
-            idScan: idScan || 'UNKNOWN',
-            containerNo: 'N/A',
-            truckNo: 'N/A',
-            scanTime: logTimestamp,
-            status: 'NOK',
-            image1_path: null,
-            image2_path: null,
-            image3_path: null,
-            image4_path: null,
-            image5_path: null,
-            image6_path: null,
-            errorMessage: data.resultDesc || 'Scan failed',
-            rawData: data
+        // Coba perbaiki JSON yang rusak
+        try {
+          // Tambahkan kurung tutup jika diperlukan
+          if (!jsonString.endsWith('}')) {
+            jsonString = jsonString + '}';
+            console.log('🔧 Fixed JSON - added closing brace');
           }
-        };
-      }
-
-      // ✅ HANDLE OK CASE - resultCode: true
-      if (data.resultCode === true) {
-        console.log('🟢 PROCESSING OK SCAN - ID:', idScan);
-        
-        let resultData = data.resultData;
-        
-        // Parse resultData jika berupa string JSON
-        if (typeof resultData === 'string' && resultData.trim().startsWith('{')) {
-          try {
-            resultData = JSON.parse(resultData);
-            console.log('📦 Parsed resultData from string');
-          } catch (e) {
-            console.log('⚠️ Could not parse resultData string, using as-is');
-          }
-        }
-
-        // Jika resultData adalah object yang valid
-        if (resultData && typeof resultData === 'object') {
-          return {
-            type: 'SCAN',
-            data: {
-              idScan: idScan || resultData.PICNO || resultData.ID || 'UNKNOWN',
-              containerNo: resultData.CONTAINER_NO || 'N/A',
-              truckNo: resultData.FYCO_PRESENT || resultData.TRUCK_NO || 'N/A',
-              scanTime: resultData.SCANTIME || logTimestamp,
-              status: 'OK',
-              image1_path: resultData.IMAGE1_PATH || null,
-              image2_path: resultData.IMAGE2_PATH || null,
-              image3_path: resultData.IMAGE3_PATH || null,
-              image4_path: resultData.IMAGE4_PATH || null,
-              image5_path: resultData.IMAGE5_PATH || null,
-              image6_path: resultData.IMAGE6_PATH || null,
-              errorMessage: null,
-              rawData: resultData
-            }
-          };
-        } else {
-          // Jika resultData tidak ada atau bukan object
-          return {
-            type: 'SCAN',
-            data: {
-              idScan: idScan || 'UNKNOWN',
-              containerNo: 'N/A',
-              truckNo: 'N/A',
-              scanTime: logTimestamp,
-              status: 'OK',
-              image1_path: null,
-              image2_path: null,
-              image3_path: null,
-              image4_path: null,
-              image5_path: null,
-              image6_path: null,
-              errorMessage: null,
-              rawData: data
-            }
-          };
+          
+          // Hapus karakter newline atau spasi berlebih
+          jsonString = jsonString.trim();
+          
+          const data = JSON.parse(jsonString);
+          console.log('✅ JSON fixed and parsed successfully - resultCode:', data.resultCode);
+          
+          return processScanData(data, idScan, logTimestamp);
+          
+        } catch (fixError) {
+          console.error('❌ JSON fix failed:', fixError.message);
+          continue; // Coba pattern berikutnya
         }
       }
-
-    } catch (error) {
-      console.error('❌ JSON parse error:', error.message);
-      console.log('Problematic JSON:', jsonString);
     }
   }
 
-  // 3. FALLBACK PATTERN - Cari JSON dengan resultCode:false secara langsung
-  // Pattern khusus untuk menangkap {"resultCode":false,...}
-  const nokPattern = /\{"resultCode":false[^}]*\}/;
-  const nokMatch = line.match(nokPattern);
-  
-  if (nokMatch) {
-    const jsonString = nokMatch[0];
-    console.log('🔄 NOK Fallback pattern matched:', jsonString);
+  // 3. FALLBACK - Cari JSON secara manual di line
+  const jsonStart = line.indexOf('{"resultCode":');
+  if (jsonStart !== -1) {
+    const jsonSubstring = line.substring(jsonStart);
+    const jsonEnd = jsonSubstring.indexOf('}');
     
-    try {
-      const data = JSON.parse(jsonString);
+    if (jsonEnd !== -1) {
+      let jsonString = jsonSubstring.substring(0, jsonEnd + 1);
+      console.log('🔄 Manual JSON extraction:', jsonString);
       
-      if (data.resultCode === false) {
-        console.log('🔴 PROCESSING NOK SCAN (Fallback) - ID:', idScan);
-        console.log('🔴 Error Description:', data.resultDesc);
+      try {
+        const data = JSON.parse(jsonString);
+        console.log('✅ Manual JSON parsed - resultCode:', data.resultCode);
         
-        return {
-          type: 'SCAN',
-          data: {
-            idScan: idScan || 'UNKNOWN',
-            containerNo: 'N/A',
-            truckNo: 'N/A',
-            scanTime: logTimestamp,
-            status: 'NOK',
-            image1_path: null,
-            image2_path: null,
-            image3_path: null,
-            image4_path: null,
-            image5_path: null,
-            image6_path: null,
-            errorMessage: data.resultDesc || 'Scan failed',
-            rawData: data
-          }
-        };
+        return processScanData(data, idScan, logTimestamp);
+        
+      } catch (error) {
+        console.log('❌ Manual JSON parse failed');
       }
-    } catch (error) {
-      console.log('⚠️ NOK Fallback JSON parse failed');
     }
   }
 
-  // 4. FALLBACK 2 - Cari pattern response text dengan JSON
-  const responseTextPattern = /response text:\s*(\{.*\})/i;
-  const responseTextMatch = line.match(responseTextPattern);
-  
-  if (responseTextMatch) {
-    const jsonString = responseTextMatch[1];
-    console.log('🔄 Response text fallback:', jsonString);
-    
-    try {
-      const data = JSON.parse(jsonString);
-      
-      if (data.resultCode === false) {
-        console.log('🔴 PROCESSING NOK SCAN (Response Text Fallback) - ID:', idScan);
-        
-        return {
-          type: 'SCAN',
-          data: {
-            idScan: idScan || 'UNKNOWN',
-            containerNo: 'N/A',
-            truckNo: 'N/A',
-            scanTime: logTimestamp,
-            status: 'NOK',
-            image1_path: null,
-            image2_path: null,
-            image3_path: null,
-            image4_path: null,
-            image5_path: null,
-            image6_path: null,
-            errorMessage: data.resultDesc || 'Scan failed',
-            rawData: data
-          }
-        };
-      }
-      
-      if (data.resultCode === true) {
-        console.log('🟢 PROCESSING OK SCAN (Response Text Fallback) - ID:', idScan);
-        // ... (sama seperti bagian OK di atas)
-      }
-      
-    } catch (error) {
-      console.log('⚠️ Response text fallback parse failed');
-    }
-  }
-
-  // 5. Cek untuk connection logs
+  // 4. Cek untuk connection logs
   if (line.includes('connected') || line.includes('connection') || 
       line.includes('Connected') || line.includes('connect') ||
       line.includes('disconnect') || line.includes('Disconnected')) {
@@ -227,19 +111,13 @@ const parseLogLine = (line) => {
     };
   }
 
-  // 6. Debug: Tampilkan line yang mengandung kata kunci scan tapi tidak terdeteksi
+  // 5. Debug: Tampilkan line yang mengandung kata kunci scan tapi tidak terdeteksi
   if (line.includes('center response') || line.includes('resultCode') || 
-      line.includes('response text') || (line.includes('false') && line.includes('resultCode'))) {
+      line.includes('response text')) {
     console.log('⚠️  POTENTIAL SCAN LINE NOT PARSED:', line.substring(0, 300));
-    
-    // Debug khusus untuk line yang mengandung resultCode:false tapi tidak terdeteksi
-    if (line.includes('resultCode":false')) {
-      console.log('🚨 MISSED NOK SCAN - Contains resultCode:false but not parsed!');
-      console.log('Full line:', line);
-    }
   }
 
-  // 7. Jika bukan keduanya, anggap sebagai log system
+  // 6. Jika bukan keduanya, anggap sebagai log system
   return { 
     type: 'SYSTEM_LOG',
     data: {
@@ -249,5 +127,92 @@ const parseLogLine = (line) => {
     }
   };
 };
+
+// 🔧 FUNGSI BARU UNTUK PROCESS SCAN DATA
+function processScanData(data, idScan, logTimestamp) {
+  // Handle case NOK (resultCode: false)
+  if (data.resultCode === false) {
+    console.log('🔴 PROCESSING NOK SCAN - ID:', idScan);
+    console.log('🔴 Error Description:', data.resultDesc);
+    
+    return {
+      type: 'SCAN',
+      data: {
+        idScan: idScan || 'UNKNOWN',
+        containerNo: 'N/A',
+        truckNo: 'N/A',
+        scanTime: logTimestamp,
+        status: 'NOK',
+        image1_path: null,
+        image2_path: null,
+        image3_path: null,
+        image4_path: null,
+        image5_path: null,
+        image6_path: null,
+        errorMessage: data.resultDesc || 'Scan failed',
+        rawData: data
+      }
+    };
+  }
+
+  // Handle case OK (resultCode: true)
+  if (data.resultCode === true) {
+    console.log('🟢 PROCESSING OK SCAN - ID:', idScan);
+    
+    let resultData = data.resultData;
+    
+    // Parse resultData jika berupa string JSON
+    if (typeof resultData === 'string' && resultData.trim().startsWith('{')) {
+      try {
+        resultData = JSON.parse(resultData);
+        console.log('📦 Parsed resultData from string');
+      } catch (e) {
+        console.log('⚠️ Could not parse resultData string, using as-is');
+      }
+    }
+
+    // Jika resultData adalah object yang valid
+    if (resultData && typeof resultData === 'object') {
+      return {
+        type: 'SCAN',
+        data: {
+          idScan: idScan || resultData.PICNO || resultData.ID || 'UNKNOWN',
+          containerNo: resultData.CONTAINER_NO || 'N/A',
+          truckNo: resultData.FYCO_PRESENT || resultData.TRUCK_NO || 'N/A',
+          scanTime: resultData.SCANTIME || logTimestamp,
+          status: 'OK',
+          image1_path: resultData.IMAGE1_PATH || null,
+          image2_path: resultData.IMAGE2_PATH || null,
+          image3_path: resultData.IMAGE3_PATH || null,
+          image4_path: resultData.IMAGE4_PATH || null,
+          image5_path: resultData.IMAGE5_PATH || null,
+          image6_path: resultData.IMAGE6_PATH || null,
+          errorMessage: null,
+          rawData: resultData
+        }
+      };
+    } else {
+      // Jika resultData tidak ada atau bukan object
+      return {
+        type: 'SCAN',
+        data: {
+          idScan: idScan || 'UNKNOWN',
+          containerNo: 'N/A',
+          truckNo: 'N/A',
+          scanTime: logTimestamp,
+          status: 'OK',
+          image1_path: null,
+          image2_path: null,
+          image3_path: null,
+          image4_path: null,
+          image5_path: null,
+          image6_path: null,
+          errorMessage: null,
+          rawData: data
+        }
+      };
+    }
+  }
+}
 
 module.exports = { parseLogLine };
