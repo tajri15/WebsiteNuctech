@@ -29,7 +29,6 @@ const parseLogLine = (line) => {
   }
 
   // 2. PATTERN UTAMA UNTUK RESPONSE NOK & OK
-  // Fokus pada pattern yang sesuai dengan format log sebenarnya
   const responsePattern = /center response:.*?response text:\s*(\{.*?\})/i;
   const responseMatch = line.match(responsePattern);
   
