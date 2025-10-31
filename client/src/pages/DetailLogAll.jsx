@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import DetailLogTable from '../components/DetailLogTable';
-import { Typography, Card, Row, Col, Statistic, Tag } from 'antd';
+import { Typography, Card, Row, Col, Statistic, Tag, message } from 'antd';
 import { FileTextOutlined, DatabaseOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import io from 'socket.io-client';
@@ -33,21 +33,37 @@ const DetailLogAll = () => {
     }, []);
 
     useEffect(() => {
+        console.log('🔌 DetailLogAll: Setting up WebSocket listener...');
+        
         const handleNewScan = (newScanData) => {
+            console.log('🆕 DetailLogAll - New scan received:', newScanData.status);
+            
+            // ✅ PERBAIKAN DI SINI - Gunakan === 'NOK' bukan !== 'OK'
             setStats(prevStats => ({
                 total: prevStats.total + 1,
                 ok: prevStats.ok + (newScanData.status === 'OK' ? 1 : 0),
-                nok: prevStats.nok + (newScanData.status !== 'OK' ? 1 : 0),
+                nok: prevStats.nok + (newScanData.status === 'NOK' ? 1 : 0), // ← INI YANG DIPERBAIKI
             }));
+            
             setLastUpdate(new Date().toLocaleString('id-ID'));
+            
+            // Notifikasi berdasarkan status
+            if (newScanData.status === 'OK') {
+                message.success(`✅ OK Scan: ${newScanData.container_no || newScanData.id_scan}`);
+            } else if (newScanData.status === 'NOK') {
+                message.error(`❌ NOK Scan: ${newScanData.container_no || newScanData.id_scan}`);
+            }
         };
 
         socket.on('new_scan', handleNewScan);
 
         return () => {
+            console.log('🔌 DetailLogAll: Cleaning up WebSocket listener...');
             socket.off('new_scan', handleNewScan);
         };
     }, []);
+
+    const successRate = stats.total > 0 ? ((stats.ok / stats.total) * 100).toFixed(1) : 0;
 
     return (
         <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
@@ -59,6 +75,9 @@ const DetailLogAll = () => {
                 </Title>
                 <Text type="secondary" style={{ fontSize: '16px', marginTop: 8, display: 'block' }}>
                     Comprehensive view of all scanning transactions and transmission logs
+                </Text>
+                <Text type="secondary" style={{ fontSize: '12px' }}>
+                    Success Rate: <Text strong>{successRate}%</Text> | Last Update: {lastUpdate}
                 </Text>
             </div>
 
@@ -106,12 +125,12 @@ const DetailLogAll = () => {
                         </Tag>
                     </div>
                     <Text type="secondary" style={{ fontSize: '14px' }}>
-                        Last updated: {lastUpdate}
+                        Real-time updates active
                     </Text>
                 </div>
             </Card>
 
-            {/* Main Content - Menambahkan prop showTransmissionFilter */}
+            {/* Main Content */}
             <Card style={{ borderRadius: 12, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', border: 'none' }} bodyStyle={{ padding: 0 }}>
                 <DetailLogTable filterStatus="all" showTransmissionFilter={true} />
             </Card>
