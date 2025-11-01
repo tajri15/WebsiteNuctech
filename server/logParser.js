@@ -129,7 +129,9 @@ const parseLogLine = (line) => {
 };
 
 // 🔧 FUNGSI BARU UNTUK PROCESS SCAN DATA
-if (data.resultCode === false) {
+function processScanData(data, idScan, logTimestamp) {
+  // Handle case NOK (resultCode: false)
+  if (data.resultCode === false) {
     console.log('🔴 PROCESSING NOK SCAN - ID:', idScan);
     console.log('🔴 Error Description:', data.resultDesc);
     
@@ -147,11 +149,11 @@ if (data.resultCode === false) {
         image4_path: null,
         image5_path: null,
         image6_path: null,
-        errorMessage: data.resultDesc || 'Scan failed', // Pastikan ini disimpan
-        rawData: data // Simpan raw data juga
+        errorMessage: data.resultDesc || 'Scan failed',
+        rawData: data
       }
     };
-
+  }
 
   // Handle case OK (resultCode: true)
   if (data.resultCode === true) {
