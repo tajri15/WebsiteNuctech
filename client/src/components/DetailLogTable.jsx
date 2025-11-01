@@ -640,114 +640,196 @@ const DetailLogTable = ({ filterStatus, showTransmissionFilter = false }) => {
     </Modal>
   );
 
-  // Modal untuk detail NOK (sesuai gambar)
-  const renderNokDetailModal = () => (
-    <Modal
-      title="NOK Scan Details"
-      visible={isModalVisible}
-      onCancel={() => setIsModalVisible(false)}
-      footer={[
-        <Button key="close" onClick={() => setIsModalVisible(false)}>
-          Tutup
-        </Button>
-      ]}
-      width={700}
-    >
-      {selectedRecord && (
-        <div style={{ fontFamily: 'Arial, sans-serif' }}>
-          {/* CORE INFORMATION */}
-          <div style={{ 
-            backgroundColor: '#f8f9fa', 
-            padding: '16px', 
-            borderRadius: '8px',
-            marginBottom: '16px',
-            borderLeft: '4px solid #dc3545'
-          }}>
-            <h3 style={{ color: '#dc3545', margin: '0 0 12px 0', fontSize: '16px' }}>CORE INFORMATION</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
-              <strong>ID Scan:</strong>
-              <code style={{ background: '#fff', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
-                {selectedRecord.id_scan}
-              </code>
-              
-              <strong>Container No:</strong>
-              <span>{selectedRecord.container_no || 'N/A'}</span>
-              
-              <strong>Scan Time:</strong>
-              <span>{selectedRecord.scan_time ? new Date(selectedRecord.scan_time).toLocaleString('id-ID') : 'N/A'}</span>
-              
-              <strong>Status:</strong>
-              <Tag color="red">NOK</Tag>
-            </div>
-          </div>
+  // Modal untuk detail NOK (menggunakan data aktual dari database)
+  const renderNokDetailModal = () => {
+    // Format waktu untuk display
+    const formatDateTime = (dateString) => {
+      if (!dateString) return 'N/A';
+      return new Date(dateString).toLocaleString('id-ID', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    };
 
-          {/* TIMING DETAILS */}
-          <div style={{ 
-            backgroundColor: '#fff3cd', 
-            padding: '16px', 
-            borderRadius: '8px',
-            marginBottom: '16px',
-            borderLeft: '4px solid #ffc107'
-          }}>
-            <h3 style={{ color: '#856404', margin: '0 0 12px 0', fontSize: '16px' }}>TIMING DETAILS</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
-              <strong>Update Time:</strong>
-              <span>{selectedRecord.updated_at ? new Date(selectedRecord.updated_at).toLocaleString('id-ID') : 'N/A'}</span>
-              
-              <strong>Time Difference:</strong>
-              <span>00:05:09</span>
-              
-              <strong>Image Count:</strong>
-              <span>0</span>
-              
-              <strong>Task Time:</strong>
-              <span>N/A</span>
-              
-              <strong>Retry Count:</strong>
-              <span>N/A</span>
-            </div>
-          </div>
+    // Hitung time difference jika ada scan_time dan updated_at
+    const calculateTimeDifference = () => {
+      if (!selectedRecord.scan_time || !selectedRecord.updated_at) return 'N/A';
+      
+      const scanTime = new Date(selectedRecord.scan_time);
+      const updateTime = new Date(selectedRecord.updated_at);
+      const diffMs = Math.abs(updateTime - scanTime);
+      
+      const hours = Math.floor(diffMs / (1000 * 60 * 60));
+      const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
+      
+      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    };
 
-          {/* IMAGE INFORMATION */}
-          <div style={{ 
-            backgroundColor: '#e2e3e5', 
-            padding: '16px', 
-            borderRadius: '8px',
-            marginBottom: '16px'
-          }}>
-            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>IMAGE INFORMATION</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
-              <strong>Image Path:</strong>
-              <span style={{ color: '#6c757d' }}>N/A</span>
-            </div>
-          </div>
+    // Hitung jumlah gambar yang tersimpan di database
+    const getActualImageCount = () => {
+      let count = 0;
+      for (let i = 1; i <= 6; i++) {
+        if (selectedRecord[`image${i}_path`]) count++;
+      }
+      return count;
+    };
 
-          {/* ADDITIONAL RAW DATA */}
-          <div style={{ 
-            backgroundColor: '#f8f9fa', 
-            padding: '16px', 
-            borderRadius: '8px',
-            border: '1px solid #dee2e6'
-          }}>
-            <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>ADDITIONAL RAW DATA</h3>
-            <div style={{ fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.5' }}>
-              <div>| CONTAINER_NO | {selectedRecord.container_no || 'N/A'} |</div>
-              <div>| container_no | {selectedRecord.container_no || 'N/A'} |</div>
-              <div>| image_count | 0 |</div>
-              <br />
-              <div>log_timestamp  {selectedRecord.scan_time ? new Date(selectedRecord.scan_time).toLocaleString('id-ID') : 'N/A'}</div>
-              <div>post_url  http://10.226.52.32:8040/services/xRaySby/out</div>
-              <div>resend_http_status  200</div>
-              <br />
-              <div>resend_response_text  {"{\"resultCode\":false,\"resultDesc\":\"java.lang.ArrayListOutOfBoundsException:1\",\"resultData\":\".\"}"}</div>
-              <br />
-              <div>resend_status  FAILED</div>
+    // Ambil error message dari database jika ada
+    const getErrorMessage = () => {
+      return selectedRecord.error_message || "java.lang.ArrayListOutOfBoundsException:1";
+    };
+
+    return (
+      <Modal
+        title="NOK Scan Details"
+        visible={isModalVisible}
+        onCancel={() => setIsModalVisible(false)}
+        footer={[
+          <Button key="close" onClick={() => setIsModalVisible(false)}>
+            Tutup
+          </Button>
+        ]}
+        width={700}
+      >
+        {selectedRecord && (
+          <div style={{ fontFamily: 'Arial, sans-serif' }}>
+            {/* CORE INFORMATION */}
+            <div style={{ 
+              backgroundColor: '#f8f9fa', 
+              padding: '16px', 
+              borderRadius: '8px',
+              marginBottom: '16px',
+              borderLeft: '4px solid #dc3545'
+            }}>
+              <h3 style={{ color: '#dc3545', margin: '0 0 12px 0', fontSize: '16px' }}>CORE INFORMATION</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+                <strong>ID Scan:</strong>
+                <code style={{ background: '#fff', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
+                  {selectedRecord.id_scan || 'N/A'}
+                </code>
+                
+                <strong>Container No:</strong>
+                <span>{selectedRecord.container_no || 'N/A'}</span>
+                
+                <strong>Scan Time:</strong>
+                <span>{formatDateTime(selectedRecord.scan_time)}</span>
+                
+                <strong>Status:</strong>
+                <Tag color="red">NOK</Tag>
+              </div>
             </div>
+
+            {/* TIMING DETAILS */}
+            <div style={{ 
+              backgroundColor: '#fff3cd', 
+              padding: '16px', 
+              borderRadius: '8px',
+              marginBottom: '16px',
+              borderLeft: '4px solid #ffc107'
+            }}>
+              <h3 style={{ color: '#856404', margin: '0 0 12px 0', fontSize: '16px' }}>TIMING DETAILS</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+                <strong>Update Time:</strong>
+                <span>{formatDateTime(selectedRecord.updated_at)}</span>
+                
+                <strong>Time Difference:</strong>
+                <span>{calculateTimeDifference()}</span>
+                
+                <strong>Image Count:</strong>
+                <span>{getActualImageCount()}</span>
+                
+                <strong>Task Time:</strong>
+                <span>N/A</span>
+                
+                <strong>Retry Count:</strong>
+                <span>{selectedRecord.resend_count || 'N/A'}</span>
+              </div>
+            </div>
+
+            {/* IMAGE INFORMATION */}
+            <div style={{ 
+              backgroundColor: '#e2e3e5', 
+              padding: '16px', 
+              borderRadius: '8px',
+              marginBottom: '16px'
+            }}>
+              <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>IMAGE INFORMATION</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center' }}>
+                <strong>Image Path:</strong>
+                <span style={{ color: '#6c757d', fontSize: '12px' }}>
+                  {selectedRecord.image1_path || 'N/A'}
+                </span>
+              </div>
+              
+              {/* Tampilkan semua image paths yang ada */}
+              {[1, 2, 3, 4, 5, 6].map(i => (
+                selectedRecord[`image${i}_path`] && (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '8px', alignItems: 'center', marginTop: '4px' }}>
+                    <strong>Image {i}:</strong>
+                    <span style={{ color: '#6c757d', fontSize: '12px', fontFamily: 'monospace' }}>
+                      {selectedRecord[`image${i}_path`]}
+                    </span>
+                  </div>
+                )
+              ))}
+            </div>
+
+            {/* ADDITIONAL RAW DATA */}
+            <div style={{ 
+              backgroundColor: '#f8f9fa', 
+              padding: '16px', 
+              borderRadius: '8px',
+              border: '1px solid #dee2e6'
+            }}>
+              <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>ADDITIONAL RAW DATA</h3>
+              <div style={{ fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.5' }}>
+                <div>| CONTAINER_NO | {selectedRecord.container_no || 'N/A'} |</div>
+                <div>| container_no | {selectedRecord.container_no || 'N/A'} |</div>
+                <div>| image_count | {getActualImageCount()} |</div>
+                <br />
+                <div>log_timestamp  {formatDateTime(selectedRecord.scan_time)}</div>
+                <div>post_url  http://10.226.52.32:8040/services/xRaySby/out</div>
+                <div>resend_http_status  {selectedRecord.resend_status === 'SUCCESS' ? '200' : 'N/A'}</div>
+                <br />
+                <div>resend_response_text  {`{"resultCode":false,"resultDesc":"${getErrorMessage()}","resultData":"."}`}</div>
+                <br />
+                <div>resend_status  {selectedRecord.resend_status || 'FAILED'}</div>
+                
+                {/* Tampilkan additional data jika ada */}
+                {selectedRecord.raw_data && (
+                  <>
+                    <br />
+                    <div>raw_data  {JSON.stringify(selectedRecord.raw_data)}</div>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* ERROR DETAILS */}
+            {selectedRecord.error_message && (
+              <div style={{ 
+                backgroundColor: '#f8d7da', 
+                padding: '16px', 
+                borderRadius: '8px',
+                marginTop: '16px',
+                borderLeft: '4px solid #dc3545'
+              }}>
+                <h3 style={{ color: '#721c24', margin: '0 0 8px 0', fontSize: '16px' }}>ERROR DETAILS</h3>
+                <div style={{ fontFamily: 'monospace', fontSize: '12px', color: '#721c24' }}>
+                  {selectedRecord.error_message}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
-    </Modal>
-  );
+        )}
+      </Modal>
+    );
+  };
 
   return (
     <div style={{ padding: '24px' }}>
