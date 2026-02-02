@@ -1,4 +1,3 @@
-// containerValidator.js
 const containerValidator = {
   // Pola dasar container: 4 huruf + 7 angka
   CONTAINER_PATTERN: /^[A-Z]{4}\d{7}$/,
