@@ -1,884 +1,599 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Table, Card, Row, Col, Typography, Tag, Button, 
-  DatePicker, Select, Input, Progress, Modal, Image,
-  Alert, Statistic, message, Badge, Tooltip, Space,
-  Descriptions, Divider, Spin, Switch, Popconfirm
+import {
+  Card,
+  Table,
+  Tag,
+  Button,
+  Space,
+  DatePicker,
+  Typography,
+  message,
+  Modal,
+  Image,
+  Spin,
+  Tooltip,
+  Row,
+  Col,
+  Statistic,
+  Progress,
+  Select,
+  Input
 } from 'antd';
-import { 
-  CheckCircleOutlined, CloseCircleOutlined, 
-  EyeOutlined, FileExcelOutlined, ReloadOutlined,
-  SearchOutlined, FilterOutlined, WarningOutlined,
-  BarChartOutlined, DownloadOutlined, InfoCircleOutlined
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DownloadOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  EyeOutlined,
+  WarningOutlined,
+  FileExcelOutlined,
+  FilePdfOutlined
 } from '@ant-design/icons';
+import * as XLSX from 'xlsx';
+import jsPDF from 'jspdf';
+import 'jspdf-autotable';
+import dayjs from 'dayjs';
 import axios from 'axios';
-import moment from 'moment';
-import io from 'socket.io-client';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
-const { Option } = Select;
-const socket = io('http://localhost:5000');
+
+// Fungsi untuk validasi format nomor container
+const validateContainerFormat = (containerNo) => {
+  if (!containerNo || containerNo.trim() === '' || containerNo.toUpperCase().includes('SCAN FAILED')) {
+    return { isValid: false, reason: 'empty_or_failed' };
+  }
+
+  // Pattern untuk single container: 4 huruf + 7 angka
+  const singlePattern = /^[A-Z]{4}\d{7}$/;
+  
+  // Pattern untuk double container: 4 huruf + 7 angka / 4 huruf + 7 angka
+  const doublePattern = /^[A-Z]{4}\d{7}\/[A-Z]{4}\d{7}$/;
+
+  if (singlePattern.test(containerNo.trim()) || doublePattern.test(containerNo.trim())) {
+    return { isValid: true, reason: 'valid' };
+  }
+
+  return { isValid: false, reason: 'invalid_format' };
+};
+
+// Fungsi untuk membandingkan container dengan OCR dari gambar
+const compareContainerWithOCR = async (containerNo, images) => {
+  // Simulasi OCR comparison - dalam implementasi real, ini akan call API OCR
+  // Untuk demo, kita akan validasi format saja
+  const validation = validateContainerFormat(containerNo);
+  
+  return {
+    match: validation.isValid,
+    confidence: validation.isValid ? 95 : 0,
+    ocrText: containerNo,
+    validation: validation
+  };
+};
 
 const ContainerValidation = () => {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState([]);
-  const [pagination, setPagination] = useState({
-    current: 1,
-    pageSize: 10,
+  const [filteredData, setFilteredData] = useState([]);
+  const [dateRange, setDateRange] = useState(null);
+  const [selectedStatus, setSelectedStatus] = useState('all');
+  const [searchText, setSearchText] = useState('');
+  const [imageModalVisible, setImageModalVisible] = useState(false);
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [statistics, setStatistics] = useState({
     total: 0,
+    valid: 0,
+    invalid: 0,
+    validPercentage: 0
   });
-  const [filters, setFilters] = useState({
-    startDate: null,
-    endDate: null,
-    validationStatus: 'all',
-    searchText: '',
-  });
-  const [stats, setStats] = useState(null);
-  const [selectedRecord, setSelectedRecord] = useState(null);
-  const [detailModalVisible, setDetailModalVisible] = useState(false);
-  const [batchProcessing, setBatchProcessing] = useState(false);
-  const [batchProgress, setBatchProgress] = useState(0);
-  const [exporting, setExporting] = useState(false);
-  const [revalidating, setRevalidating] = useState(false);
 
-  // Fetch data
-  const fetchData = async (params = {}) => {
+  // Fetch data dari API
+  const fetchValidationData = async () => {
     setLoading(true);
     try {
-      const requestParams = {
-        page: params.current || pagination.current,
-        pageSize: params.pageSize || pagination.pageSize,
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-      };
-
-      if (filters.searchText) {
-        requestParams.search = filters.searchText;
-      }
-
-      const response = await axios.get('http://localhost:5000/api/container/invalid', {
-        params: requestParams,
-      });
-      
-      setData(response.data.data);
-      setPagination({
-        current: response.data.page,
-        pageSize: response.data.pageSize,
-        total: response.data.total,
+      const response = await axios.get('http://localhost:5000/api/container-validation', {
+        params: {
+          startDate: dateRange?.[0]?.format('YYYY-MM-DD HH:mm:ss'),
+          endDate: dateRange?.[1]?.format('YYYY-MM-DD HH:mm:ss')
+        }
       });
 
-      console.log('✅ Validation data loaded:', response.data.data.length, 'records');
+      const validationResults = await Promise.all(
+        response.data.data.map(async (item) => {
+          const images = [
+            item.image1_path,
+            item.image2_path,
+            item.image3_path,
+            item.image4_path,
+            item.image5_path,
+            item.image6_path
+          ].filter(Boolean);
+
+          const ocrResult = await compareContainerWithOCR(item.container_no, images);
+
+          return {
+            ...item,
+            isValid: ocrResult.match,
+            confidence: ocrResult.confidence,
+            ocrText: ocrResult.ocrText,
+            validationReason: ocrResult.validation.reason,
+            images: images
+          };
+        })
+      );
+
+      setData(validationResults);
+      updateStatistics(validationResults);
       
+      message.success('Data berhasil dimuat');
     } catch (error) {
-      console.error("❌ Failed to load validation data:", error);
-      message.error('Failed to load validation data');
+      console.error('Error fetching validation data:', error);
+      message.error('Gagal memuat data validasi');
     } finally {
       setLoading(false);
     }
   };
 
-  // Fetch stats
-  const fetchStats = async () => {
-    try {
-      const params = {};
-      if (filters.startDate) params.startDate = filters.startDate;
-      if (filters.endDate) params.endDate = filters.endDate;
-      
-      const response = await axios.get('http://localhost:5000/api/container/validation-stats', {
-        params
-      });
-      
-      setStats(response.data.stats);
-    } catch (error) {
-      console.error("❌ Failed to load validation stats:", error);
-    }
+  // Update statistik
+  const updateStatistics = (validationData) => {
+    const total = validationData.length;
+    const valid = validationData.filter(item => item.isValid).length;
+    const invalid = total - valid;
+    const validPercentage = total > 0 ? ((valid / total) * 100).toFixed(2) : 0;
+
+    setStatistics({
+      total,
+      valid,
+      invalid,
+      validPercentage: parseFloat(validPercentage)
+    });
   };
 
+  // Filter data
   useEffect(() => {
-    fetchData();
-    fetchStats();
-  }, [filters, pagination.current]);
+    let filtered = [...data];
 
-  // WebSocket listener for validation updates
+    // Filter berdasarkan status
+    if (selectedStatus !== 'all') {
+      filtered = filtered.filter(item => {
+        if (selectedStatus === 'valid') return item.isValid;
+        if (selectedStatus === 'invalid') return !item.isValid;
+        return true;
+      });
+    }
+
+    // Filter berdasarkan search
+    if (searchText) {
+      filtered = filtered.filter(item =>
+        item.container_no?.toLowerCase().includes(searchText.toLowerCase()) ||
+        item.id_scan?.toLowerCase().includes(searchText.toLowerCase())
+      );
+    }
+
+    setFilteredData(filtered);
+  }, [data, selectedStatus, searchText]);
+
+  // Load data saat component mount
   useEffect(() => {
-    const handleContainerValidated = (data) => {
-      console.log('✅ Container validation update:', data);
-      message.info(`Container ${data.containerNo} validation: ${data.isValid ? 'Valid' : 'Invalid'}`);
-      
-      // Refresh data if current scan is in view
-      if (data.isValid === false) {
-        fetchData();
-        fetchStats();
-      }
-    };
+    fetchValidationData();
+  }, [dateRange]);
 
-    const handleBatchComplete = (data) => {
-      console.log('✅ Batch validation complete:', data);
-      message.success(`Batch validation complete: ${data.processed} scans processed`);
-      setBatchProcessing(false);
-      setBatchProgress(0);
-      
-      // Refresh data
-      fetchData();
-      fetchStats();
-    };
-
-    const handleBatchProgress = (data) => {
-      setBatchProgress(data.progress);
-    };
-
-    socket.on('container_validated', handleContainerValidated);
-    socket.on('batch_validation_complete', handleBatchComplete);
-    socket.on('batch_validation_progress', handleBatchProgress);
-
-    return () => {
-      socket.off('container_validated', handleContainerValidated);
-      socket.off('batch_validation_complete', handleBatchComplete);
-      socket.off('batch_validation_progress', handleBatchProgress);
-    };
-  }, []);
-
-  // Handle revalidation single scan
-  const handleRevalidate = async (record) => {
-    try {
-      setRevalidating(true);
-      message.loading(`Revalidating container ${record.container_no}...`, 0);
-      
-      const response = await axios.post(`http://localhost:5000/api/container/validate-scan/${record.id}`, {
-        forceRevalidate: true
-      });
-      
-      message.destroy();
-      
-      if (response.data.success) {
-        message.success('Container revalidated successfully');
-        fetchData();
-        fetchStats();
-        
-        // Show validation result
-        if (response.data.validationSummary) {
-          const summary = response.data.validationSummary;
-          Modal.info({
-            title: 'Validation Result',
-            content: (
-              <div>
-                <p><strong>Status:</strong> <Tag color={summary.isValid ? 'green' : 'red'}>{summary.validationStatus}</Tag></p>
-                <p><strong>Images Processed:</strong> {summary.successfulImages}/{summary.totalImages}</p>
-                <p><strong>Matches:</strong> {summary.matchCount}</p>
-                <p><strong>Confidence:</strong> {summary.confidence}%</p>
-                <p><strong>Average Similarity:</strong> {summary.avgSimilarity}%</p>
-              </div>
-            ),
-            width: 500,
-          });
-        }
-      }
-      
-    } catch (error) {
-      console.error('❌ Revalidation failed:', error);
-      message.destroy();
-      message.error(`Revalidation failed: ${error.response?.data?.message || error.message}`);
-    } finally {
-      setRevalidating(false);
+  // Download Excel
+  const downloadExcel = () => {
+    const invalidData = filteredData.filter(item => !item.isValid);
+    
+    if (invalidData.length === 0) {
+      message.warning('Tidak ada data invalid untuk didownload');
+      return;
     }
-  };
 
-  // Handle batch validation
-  const handleBatchValidate = async () => {
-    try {
-      setBatchProcessing(true);
-      setBatchProgress(0);
-      
-      message.loading('Starting batch validation...', 0);
-      
-      const response = await axios.post('http://localhost:5000/api/container/batch-validate', {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        limit: 100,
-        revalidate: true
-      });
-      
-      message.destroy();
-      
-      if (response.data.success) {
-        message.success(`Batch validation started: ${response.data.totalScans} scans`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Batch validation failed:', error);
-      message.destroy();
-      message.error(`Batch validation failed: ${error.response?.data?.message || error.message}`);
-      setBatchProcessing(false);
-    }
-  };
-
-  // Handle export
-  const handleExport = async (format = 'csv') => {
-    try {
-      setExporting(true);
-      message.loading(`Exporting data as ${format.toUpperCase()}...`, 0);
-      
-      const params = new URLSearchParams({
-        startDate: filters.startDate || '',
-        endDate: filters.endDate || '',
-        format: format
-      });
-      
-      const exportUrl = `http://localhost:5000/api/container/export-invalid?${params.toString()}`;
-      
-      const link = document.createElement('a');
-      link.href = exportUrl;
-      link.target = '_blank';
-      link.download = `invalid_containers_${moment().format('YYYYMMDD_HHmmss')}.${format === 'excel' ? 'xlsx' : 'csv'}`;
-      
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      
-      message.destroy();
-      message.success(`Export started! File will be downloaded shortly.`);
-      
-    } catch (error) {
-      console.error('❌ Export failed:', error);
-      message.destroy();
-      message.error('Export failed');
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  // Handle filter changes
-  const handleFilterChange = (key, value) => {
-    setFilters(prev => ({
-      ...prev,
-      [key]: value
+    const exportData = invalidData.map((item, index) => ({
+      'No': index + 1,
+      'ID Scan': item.id_scan,
+      'Container No': item.container_no,
+      'Waktu Scan': dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss'),
+      'Status': item.validationReason === 'empty_or_failed' ? 'Empty/Failed' : 'Format Invalid',
+      'Confidence': `${item.confidence}%`,
+      'Truck No': item.truck_no || '-'
     }));
-    setPagination(prev => ({ ...prev, current: 1 }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Invalid Containers');
+
+    // Set column widths
+    worksheet['!cols'] = [
+      { wch: 5 },  // No
+      { wch: 20 }, // ID Scan
+      { wch: 20 }, // Container No
+      { wch: 20 }, // Waktu Scan
+      { wch: 15 }, // Status
+      { wch: 12 }, // Confidence
+      { wch: 15 }  // Truck No
+    ];
+
+    const fileName = `Invalid_Containers_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
+    message.success(`File ${fileName} berhasil didownload`);
   };
 
-  // Handle date range change
-  const handleDateRangeChange = (dates) => {
-    if (dates && dates.length === 2) {
-      setFilters(prev => ({
-        ...prev,
-        startDate: dates[0].format('YYYY-MM-DD'),
-        endDate: dates[1].format('YYYY-MM-DD')
-      }));
-    } else {
-      setFilters(prev => ({
-        ...prev,
-        startDate: null,
-        endDate: null
-      }));
+  // Download PDF
+  const downloadPDF = () => {
+    const invalidData = filteredData.filter(item => !item.isValid);
+    
+    if (invalidData.length === 0) {
+      message.warning('Tidak ada data invalid untuk didownload');
+      return;
     }
-    setPagination(prev => ({ ...prev, current: 1 }));
+
+    const doc = new jsPDF();
+    
+    // Header
+    doc.setFontSize(18);
+    doc.setTextColor(220, 53, 69); // Red color
+    doc.text('Laporan Container Invalid', 14, 22);
+    
+    doc.setFontSize(11);
+    doc.setTextColor(100);
+    doc.text(`Tanggal Export: ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`, 14, 30);
+    
+    if (dateRange) {
+      doc.text(
+        `Periode: ${dateRange[0].format('DD/MM/YYYY')} - ${dateRange[1].format('DD/MM/YYYY')}`,
+        14,
+        36
+      );
+    }
+
+    // Summary
+    doc.setFontSize(10);
+    doc.setTextColor(0);
+    doc.text(`Total Invalid: ${invalidData.length} container`, 14, 44);
+
+    // Table
+    const tableData = invalidData.map((item, index) => [
+      index + 1,
+      item.id_scan,
+      item.container_no || 'N/A',
+      dayjs(item.scan_time).format('DD/MM/YYYY HH:mm'),
+      item.validationReason === 'empty_or_failed' ? 'Empty/Failed' : 'Format Invalid',
+      `${item.confidence}%`
+    ]);
+
+    doc.autoTable({
+      head: [['No', 'ID Scan', 'Container No', 'Waktu Scan', 'Alasan', 'Confidence']],
+      body: tableData,
+      startY: 50,
+      styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [220, 53, 69], textColor: 255 },
+      alternateRowStyles: { fillColor: [245, 245, 245] },
+      margin: { top: 50 }
+    });
+
+    const fileName = `Invalid_Containers_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`;
+    doc.save(fileName);
+    message.success(`File ${fileName} berhasil didownload`);
   };
 
-  // Show detail modal
-  const showDetailModal = (record) => {
-    setSelectedRecord(record);
-    setDetailModalVisible(true);
-  };
-
-  // Render validation status tag
-  const renderValidationStatus = (status, isValid) => {
-    const statusConfig = {
-      'ALL_MATCH': { color: 'green', text: 'All Match', icon: <CheckCircleOutlined /> },
-      'PARTIAL_MATCH': { color: 'orange', text: 'Partial Match', icon: <WarningOutlined /> },
-      'MISMATCH': { color: 'red', text: 'Mismatch', icon: <CloseCircleOutlined /> },
-      'OCR_FAILED': { color: 'volcano', text: 'OCR Failed', icon: <CloseCircleOutlined /> },
-      'NO_IMAGES': { color: 'default', text: 'No Images', icon: <InfoCircleOutlined /> },
-      'NOT_VALIDATED': { color: 'default', text: 'Not Validated', icon: <InfoCircleOutlined /> },
-    };
-    
-    const config = statusConfig[status] || { color: 'default', text: status, icon: <InfoCircleOutlined /> };
-    
-    return (
-      <Tag color={config.color} icon={config.icon}>
-        {config.text}
-      </Tag>
-    );
+  // Show images modal
+  const showImages = (images) => {
+    setSelectedImages(images);
+    setImageModalVisible(true);
   };
 
   // Table columns
   const columns = [
     {
-      title: 'NO.',
-      key: 'no',
+      title: 'No',
+      key: 'index',
       width: 60,
-      render: (_, record, index) => {
-        const current = pagination.current || 1;
-        const pageSize = pagination.pageSize || 10;
-        return (current - 1) * pageSize + index + 1;
-      },
+      render: (text, record, index) => index + 1,
+      align: 'center'
     },
     {
-      title: 'ID SCAN',
+      title: 'Status',
+      key: 'status',
+      width: 100,
+      align: 'center',
+      filters: [
+        { text: 'Valid', value: true },
+        { text: 'Invalid', value: false }
+      ],
+      onFilter: (value, record) => record.isValid === value,
+      render: (_, record) => (
+        <Tooltip title={record.isValid ? 'Container Valid' : `Invalid: ${record.validationReason}`}>
+          {record.isValid ? (
+            <Tag icon={<CheckCircleOutlined />} color="success">
+              VALID
+            </Tag>
+          ) : (
+            <Tag icon={<CloseCircleOutlined />} color="error">
+              INVALID
+            </Tag>
+          )}
+        </Tooltip>
+      )
+    },
+    {
+      title: 'ID Scan',
       dataIndex: 'id_scan',
       key: 'id_scan',
-      width: 150,
-      render: (text) => (
-        <Text code style={{ fontSize: '12px' }}>
-          {text || 'N/A'}
-        </Text>
-      ),
+      width: 180,
+      ellipsis: true
     },
     {
-      title: 'CONTAINER NO',
+      title: 'Container No',
       dataIndex: 'container_no',
       key: 'container_no',
       width: 180,
-      render: (text, record) => {
-        const isValid = record.is_valid_container;
-        return (
-          <div>
-            <Text 
-              strong 
-              style={{ 
-                color: isValid ? '#52c41a' : '#ff4d4f',
-                fontSize: '14px',
-                fontFamily: 'monospace'
-              }}
-            >
-              {text || 'N/A'}
-            </Text>
-            {record.validation_status && (
-              <div style={{ marginTop: 4 }}>
-                {renderValidationStatus(record.validation_status, isValid)}
-              </div>
-            )}
-          </div>
-        );
-      },
+      render: (text, record) => (
+        <div>
+          <Text strong style={{ color: record.isValid ? '#52c41a' : '#ff4d4f' }}>
+            {text || 'N/A'}
+          </Text>
+          {!record.isValid && (
+            <div>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {record.validationReason === 'empty_or_failed' ? '(Empty/Failed)' : '(Invalid Format)'}
+              </Text>
+            </div>
+          )}
+        </div>
+      )
     },
     {
-      title: 'SCAN TIME',
+      title: 'Waktu Scan',
       dataIndex: 'scan_time',
       key: 'scan_time',
       width: 180,
-      render: (text) => (
-        <Text style={{ fontSize: '12px' }}>
-          {text ? moment(text).format('DD/MM/YYYY HH:mm:ss') : '-'}
-        </Text>
+      render: (text) => dayjs(text).format('DD/MM/YYYY HH:mm:ss'),
+      sorter: (a, b) => new Date(a.scan_time) - new Date(b.scan_time)
+    },
+    {
+      title: 'Confidence',
+      dataIndex: 'confidence',
+      key: 'confidence',
+      width: 120,
+      align: 'center',
+      render: (confidence) => (
+        <div>
+          <Progress
+            percent={confidence}
+            size="small"
+            status={confidence >= 90 ? 'success' : confidence >= 70 ? 'normal' : 'exception'}
+            format={(percent) => `${percent}%`}
+          />
+        </div>
       ),
-      sorter: (a, b) => new Date(a.scan_time) - new Date(b.scan_time),
+      sorter: (a, b) => a.confidence - b.confidence
     },
     {
-      title: 'VALIDATION TIME',
-      dataIndex: 'validation_time',
-      key: 'validation_time',
-      width: 180,
-      render: (text) => (
-        <Text style={{ fontSize: '12px' }}>
-          {text ? moment(text).format('DD/MM/YYYY HH:mm:ss') : 'Not validated'}
-        </Text>
-      ),
-    },
-    {
-      title: 'STATUS',
-      dataIndex: 'validation_status',
-      key: 'validation_status',
-      width: 150,
-      render: (status, record) => {
-        const isValid = record.is_valid_container;
-        return renderValidationStatus(status, isValid);
-      },
-      filters: [
-        { text: 'All Match', value: 'ALL_MATCH' },
-        { text: 'Partial Match', value: 'PARTIAL_MATCH' },
-        { text: 'Mismatch', value: 'MISMATCH' },
-        { text: 'OCR Failed', value: 'OCR_FAILED' },
-        { text: 'No Images', value: 'NO_IMAGES' },
-        { text: 'Not Validated', value: 'NOT_VALIDATED' },
-      ],
-      onFilter: (value, record) => record.validation_status === value,
-    },
-    {
-      title: 'IMAGES',
-      key: 'images',
-      width: 100,
-      render: (_, record) => {
-        let imageCount = 0;
-        for (let i = 1; i <= 6; i++) {
-          if (record[`image${i}_path`]) imageCount++;
-        }
-        
-        let validationResult = {};
-        try {
-          validationResult = record.validation_result ? JSON.parse(record.validation_result) : {};
-        } catch (e) {}
-        
-        const processedImages = validationResult.validationSummary?.successfulImages || 0;
-        
-        return (
-          <div>
-            <Badge 
-              count={imageCount} 
-              showZero 
-              style={{ 
-                backgroundColor: processedImages === imageCount ? '#52c41a' : 
-                               processedImages > 0 ? '#faad14' : '#d9d9d9'
-              }}
-            />
-            {validationResult.validationSummary && (
-              <div style={{ fontSize: '10px', marginTop: 4 }}>
-                <Text type="secondary">
-                  {processedImages}/{imageCount} processed
-                </Text>
-              </div>
-            )}
-          </div>
-        );
-      },
-    },
-    {
-      title: 'ACTIONS',
-      key: 'actions',
-      width: 200,
+      title: 'Jumlah Gambar',
+      key: 'imageCount',
+      width: 120,
+      align: 'center',
       render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View details">
-            <Button
-              type="primary"
-              size="small"
-              icon={<EyeOutlined />}
-              onClick={() => showDetailModal(record)}
-            >
-              Details
-            </Button>
-          </Tooltip>
-          
-          <Popconfirm
-            title="Revalidate this container?"
-            description="This will process all images again using OCR."
-            onConfirm={() => handleRevalidate(record)}
-            okText="Yes"
-            cancelText="No"
-          >
-            <Button
-              type="default"
-              size="small"
-              icon={<ReloadOutlined />}
-              loading={revalidating}
-            >
-              Revalidate
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
+        <Tag color="blue">{record.images.length} gambar</Tag>
+      )
     },
+    {
+      title: 'Aksi',
+      key: 'action',
+      width: 100,
+      align: 'center',
+      render: (_, record) => (
+        <Button
+          type="link"
+          icon={<EyeOutlined />}
+          onClick={() => showImages(record.images)}
+          disabled={record.images.length === 0}
+        >
+          Lihat
+        </Button>
+      )
+    }
   ];
 
-  // Detail Modal Component
-  const renderDetailModal = () => {
-    if (!selectedRecord) return null;
-    
-    let validationResult = {};
-    try {
-      validationResult = selectedRecord.validation_result ? JSON.parse(selectedRecord.validation_result) : {};
-    } catch (e) {
-      validationResult = {};
-    }
-    
-    const images = [];
-    for (let i = 1; i <= 6; i++) {
-      const path = selectedRecord[`image${i}_path`];
-      if (path) {
-        images.push({
-          number: i,
-          path: path,
-          fullPath: `http://localhost:5000/images${path}`
-        });
-      }
-    }
-    
-    return (
-      <Modal
-        title={`Container Validation Details: ${selectedRecord.container_no}`}
-        visible={detailModalVisible}
-        onCancel={() => setDetailModalVisible(false)}
-        width={1200}
-        footer={[
-          <Button key="close" onClick={() => setDetailModalVisible(false)}>
-            Close
-          </Button>
-        ]}
-      >
-        <Row gutter={[16, 16]}>
-          <Col span={12}>
-            <Card title="Scan Information" size="small">
-              <Descriptions column={1} size="small">
-                <Descriptions.Item label="ID Scan">
-                  <Text code>{selectedRecord.id_scan}</Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="Container No">
-                  <Text strong style={{ fontSize: '16px' }}>
-                    {selectedRecord.container_no}
-                  </Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="Truck No">
-                  {selectedRecord.truck_no || '-'}
-                </Descriptions.Item>
-                <Descriptions.Item label="Scan Time">
-                  {moment(selectedRecord.scan_time).format('DD/MM/YYYY HH:mm:ss')}
-                </Descriptions.Item>
-                <Descriptions.Item label="Status">
-                  <Tag color={selectedRecord.status === 'OK' ? 'green' : 'red'}>
-                    {selectedRecord.status}
-                  </Tag>
-                </Descriptions.Item>
-              </Descriptions>
-            </Card>
-            
-            <Card title="Validation Summary" size="small" style={{ marginTop: 16 }}>
-              {validationResult.validationSummary ? (
-                <div>
-                  <Descriptions column={1} size="small">
-                    <Descriptions.Item label="Validation Status">
-                      {renderValidationStatus(
-                        validationResult.validationSummary.validationStatus,
-                        validationResult.validationSummary.isValid
-                      )}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Is Valid">
-                      <Tag color={validationResult.validationSummary.isValid ? 'green' : 'red'}>
-                        {validationResult.validationSummary.isValid ? 'YES' : 'NO'}
-                      </Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Total Images">
-                      {validationResult.validationSummary.totalImages}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Successfully Processed">
-                      {validationResult.validationSummary.successfulImages}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Matching Images">
-                      {validationResult.validationSummary.matchCount}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Confidence">
-                      <Progress 
-                        percent={parseFloat(validationResult.validationSummary.confidence)} 
-                        size="small"
-                        strokeColor={{
-                          '0%': '#ff4d4f',
-                          '100%': '#52c41a',
-                        }}
-                      />
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Average Similarity">
-                      <Progress 
-                        percent={validationResult.validationSummary.avgSimilarity} 
-                        size="small"
-                      />
-                    </Descriptions.Item>
-                  </Descriptions>
-                  
-                  {validationResult.validationSummary.reason && (
-                    <Alert
-                      message="Validation Issue"
-                      description={validationResult.validationSummary.reason}
-                      type="warning"
-                      showIcon
-                      style={{ marginTop: 12 }}
-                    />
-                  )}
-                </div>
-              ) : (
-                <Alert
-                  message="Not Validated"
-                  description="This container has not been validated yet."
-                  type="info"
-                  showIcon
-                />
-              )}
-            </Card>
-          </Col>
-          
-          <Col span={12}>
-            <Card title="Images & OCR Results" size="small">
-              {images.length > 0 ? (
-                <div>
-                  <Row gutter={[8, 8]}>
-                    {images.map(img => {
-                      const imageResult = validationResult.imageResults?.find(
-                        r => r.imageNumber === img.number
-                      );
-                      
-                      return (
-                        <Col span={12} key={img.number}>
-                          <Card 
-                            size="small" 
-                            style={{ 
-                              border: imageResult?.match ? 
-                                '2px solid #52c41a' : 
-                                '1px solid #d9d9d9'
-                            }}
-                          >
-                            <div style={{ textAlign: 'center' }}>
-                              <Image
-                                width={120}
-                                height={90}
-                                src={img.fullPath}
-                                style={{ 
-                                  objectFit: 'cover',
-                                  borderRadius: 4,
-                                }}
-                                placeholder={
-                                  <div style={{ 
-                                    width: 120, 
-                                    height: 90, 
-                                    background: '#f5f5f5',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center'
-                                  }}>
-                                    <Text type="secondary">Loading...</Text>
-                                  </div>
-                                }
-                              />
-                              <div style={{ marginTop: 8 }}>
-                                <Text strong>Image {img.number}</Text>
-                                {imageResult && (
-                                  <div style={{ marginTop: 4 }}>
-                                    <Tag 
-                                      color={imageResult.match ? 'green' : 'red'}
-                                      size="small"
-                                    >
-                                      {imageResult.match ? 'MATCH' : 'NO MATCH'}
-                                    </Tag>
-                                    {imageResult.similarity && (
-                                      <div style={{ fontSize: '10px' }}>
-                                        Similarity: {imageResult.similarity}%
-                                      </div>
-                                    )}
-                                    {imageResult.ocrResult?.primaryContainer && (
-                                      <div style={{ fontSize: '10px', marginTop: 2 }}>
-                                        OCR: {imageResult.ocrResult.primaryContainer}
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </Card>
-                        </Col>
-                      );
-                    })}
-                  </Row>
-                  
-                  {validationResult.imageResults && (
-                    <div style={{ marginTop: 16 }}>
-                      <Title level={5} style={{ marginBottom: 8 }}>OCR Details:</Title>
-                      {validationResult.imageResults
-                        .filter(r => r.processed && r.ocrResult)
-                        .map(r => (
-                          <Alert
-                            key={r.imageNumber}
-                            message={`Image ${r.imageNumber}: ${r.ocrResult.containers.join(', ') || 'No container found'}`}
-                            type={r.match ? 'success' : 'error'}
-                            showIcon
-                            style={{ marginBottom: 8 }}
-                            size="small"
-                          />
-                        ))
-                      }
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <Alert
-                  message="No Images"
-                  description="No images available for this scan."
-                  type="warning"
-                  showIcon
-                />
-              )}
-            </Card>
-          </Col>
-        </Row>
-      </Modal>
-    );
-  };
-
   return (
-    <div style={{ padding: '24px', background: '#f0f2f5', minHeight: '100vh' }}>
+    <div style={{ padding: '24px' }}>
       {/* Header */}
-      <div style={{ marginBottom: 24 }}>
-        <Title level={2} style={{ margin: 0, color: '#1890ff', display: 'flex', alignItems: 'center' }}>
-          <BarChartOutlined style={{ marginRight: 12 }} />
-          Container Validation
+      <Card style={{ marginBottom: 24, background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+        <Title level={2} style={{ color: 'white', margin: 0 }}>
+          <WarningOutlined /> Container Validation
         </Title>
-        <Text type="secondary">
-          Validate container numbers against OCR results from images
+        <Text style={{ color: 'rgba(255,255,255,0.9)' }}>
+          Validasi nomor container berdasarkan hasil OCR dari gambar scan
         </Text>
-      </div>
-
-      {/* Statistics Cards */}
-      {stats && (
-        <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-          <Col xs={24} sm={8}>
-            <Card>
-              <Statistic
-                title="Total Scans"
-                value={stats.total}
-                prefix={<BarChartOutlined />}
-                valueStyle={{ color: '#1890ff' }}
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={8}>
-            <Card>
-              <Statistic
-                title="Valid Containers"
-                value={stats.valid}
-                prefix={<CheckCircleOutlined />}
-                valueStyle={{ color: '#52c41a' }}
-              />
-              <Text type="secondary" style={{ fontSize: '12px' }}>
-                {stats.validationRate}% validation rate
-              </Text>
-            </Card>
-          </Col>
-          <Col xs={24} sm={8}>
-            <Card>
-              <Statistic
-                title="Invalid Containers"
-                value={stats.invalid}
-                prefix={<CloseCircleOutlined />}
-                valueStyle={{ color: '#ff4d4f' }}
-              />
-              <Text type="secondary" style={{ fontSize: '12px' }}>
-                {stats.accuracyRate}% accuracy rate
-              </Text>
-            </Card>
-          </Col>
-        </Row>
-      )}
-
-      {/* Filter Section */}
-      <Card style={{ marginBottom: 24 }}>
-        <Row gutter={[16, 16]} align="middle">
-          <Col>
-            <Text strong>Filter by Date:</Text>
-          </Col>
-          <Col>
-            <RangePicker
-              onChange={handleDateRangeChange}
-              style={{ width: 300 }}
-            />
-          </Col>
-          <Col>
-            <Input
-              placeholder="Search container or ID scan..."
-              prefix={<SearchOutlined />}
-              value={filters.searchText}
-              onChange={(e) => handleFilterChange('searchText', e.target.value)}
-              style={{ width: 250 }}
-            />
-          </Col>
-          <Col>
-            <Button
-              type="primary"
-              icon={<FilterOutlined />}
-              onClick={() => {
-                fetchData();
-                fetchStats();
-              }}
-            >
-              Apply Filters
-            </Button>
-          </Col>
-          <Col flex="auto" style={{ textAlign: 'right' }}>
-            <Space>
-              <Button
-                type="default"
-                icon={<ReloadOutlined />}
-                onClick={handleBatchValidate}
-                loading={batchProcessing}
-                disabled={batchProcessing}
-              >
-                {batchProcessing ? `Processing... ${batchProgress}%` : 'Batch Validate'}
-              </Button>
-              
-              <Button
-                type="default"
-                icon={<FileExcelOutlined />}
-                onClick={() => handleExport('csv')}
-                loading={exporting}
-              >
-                Export CSV
-              </Button>
-              
-              <Button
-                type="default"
-                icon={<DownloadOutlined />}
-                onClick={() => handleExport('excel')}
-                loading={exporting}
-              >
-                Export Excel
-              </Button>
-            </Space>
-          </Col>
-        </Row>
-        
-        {/* Batch Progress */}
-        {batchProcessing && (
-          <div style={{ marginTop: 16 }}>
-            <Alert
-              message="Batch Validation in Progress"
-              description={`Processing scans... ${batchProgress}% complete`}
-              type="info"
-              showIcon
-            />
-            <Progress 
-              percent={batchProgress} 
-              status="active"
-              style={{ marginTop: 8 }}
-            />
-          </div>
-        )}
       </Card>
 
-      {/* Main Table */}
+      {/* Statistics Cards */}
+      <Row gutter={16} style={{ marginBottom: 24 }}>
+        <Col span={6}>
+          <Card>
+            <Statistic
+              title="Total Container"
+              value={statistics.total}
+              prefix={<SearchOutlined />}
+              valueStyle={{ color: '#1890ff' }}
+            />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic
+              title="Valid"
+              value={statistics.valid}
+              prefix={<CheckCircleOutlined />}
+              valueStyle={{ color: '#52c41a' }}
+              suffix={`(${statistics.validPercentage}%)`}
+            />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <Statistic
+              title="Invalid"
+              value={statistics.invalid}
+              prefix={<CloseCircleOutlined />}
+              valueStyle={{ color: '#ff4d4f' }}
+              suffix={`(${(100 - statistics.validPercentage).toFixed(2)}%)`}
+            />
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card>
+            <div style={{ textAlign: 'center' }}>
+              <Text type="secondary">Accuracy Rate</Text>
+              <Progress
+                type="circle"
+                percent={statistics.validPercentage}
+                width={80}
+                strokeColor={{
+                  '0%': '#108ee9',
+                  '100%': '#87d068',
+                }}
+              />
+            </div>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Filters and Actions */}
+      <Card style={{ marginBottom: 24 }}>
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <Row gutter={16}>
+            <Col span={8}>
+              <Text strong>Rentang Waktu:</Text>
+              <RangePicker
+                showTime
+                format="DD/MM/YYYY HH:mm"
+                style={{ width: '100%', marginTop: 8 }}
+                onChange={(dates) => setDateRange(dates)}
+                placeholder={['Tanggal Mulai', 'Tanggal Selesai']}
+              />
+            </Col>
+            <Col span={6}>
+              <Text strong>Status:</Text>
+              <Select
+                style={{ width: '100%', marginTop: 8 }}
+                value={selectedStatus}
+                onChange={setSelectedStatus}
+                options={[
+                  { label: 'Semua', value: 'all' },
+                  { label: 'Valid', value: 'valid' },
+                  { label: 'Invalid', value: 'invalid' }
+                ]}
+              />
+            </Col>
+            <Col span={6}>
+              <Text strong>Cari:</Text>
+              <Input
+                placeholder="Cari container atau ID scan..."
+                prefix={<SearchOutlined />}
+                style={{ marginTop: 8 }}
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                allowClear
+              />
+            </Col>
+            <Col span={4} style={{ display: 'flex', alignItems: 'flex-end' }}>
+              <Button
+                type="primary"
+                icon={<ReloadOutlined />}
+                onClick={fetchValidationData}
+                loading={loading}
+                style={{ width: '100%' }}
+              >
+                Refresh
+              </Button>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col span={24}>
+              <Space>
+                <Button
+                  type="primary"
+                  icon={<FileExcelOutlined />}
+                  onClick={downloadExcel}
+                  style={{ background: '#52c41a', borderColor: '#52c41a' }}
+                >
+                  Download Excel (Invalid Only)
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<FilePdfOutlined />}
+                  onClick={downloadPDF}
+                  danger
+                >
+                  Download PDF (Invalid Only)
+                </Button>
+                <Text type="secondary">
+                  Menampilkan {filteredData.length} dari {data.length} data
+                </Text>
+              </Space>
+            </Col>
+          </Row>
+        </Space>
+      </Card>
+
+      {/* Table */}
       <Card>
         <Table
           columns={columns}
-          dataSource={data}
+          dataSource={filteredData}
           rowKey="id"
           loading={loading}
           pagination={{
-            ...pagination,
+            pageSize: 20,
             showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total, range) => 
-              `Showing ${range[0]}-${range[1]} of ${total} invalid containers`,
-            pageSizeOptions: ['10', '20', '50', '100'],
+            showTotal: (total) => `Total ${total} items`,
+            pageSizeOptions: ['10', '20', '50', '100']
           }}
-          onChange={(newPagination) => {
-            setPagination(newPagination);
-          }}
-          scroll={{ x: 1000 }}
+          rowClassName={(record) => !record.isValid ? 'invalid-row' : 'valid-row'}
+          scroll={{ x: 1200 }}
         />
       </Card>
 
-      {/* Detail Modal */}
-      {renderDetailModal()}
+      {/* Image Modal */}
+      <Modal
+        title="Container Images"
+        visible={imageModalVisible}
+        onCancel={() => setImageModalVisible(false)}
+        footer={null}
+        width={900}
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+          {selectedImages.map((img, index) => (
+            <div key={index} style={{ textAlign: 'center' }}>
+              <Text strong>Image {index + 1}</Text>
+              <Image
+                src={`http://localhost:5000/images/${img}`}
+                alt={`Container Image ${index + 1}`}
+                style={{ width: '100%', marginTop: 8, border: '1px solid #d9d9d9', borderRadius: 4 }}
+                fallback="data:image/png;base64,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"
+              />
+            </div>
+          ))}
+        </div>
+      </Modal>
 
-      {/* Information Alert */}
-      <Alert
-        message="Validation Information"
-        description={
-          <div>
-            <p><strong>Green (Valid):</strong> Container number matches OCR results from images</p>
-            <p><strong>Red (Invalid):</strong> Container number does not match OCR results or OCR failed</p>
-            <p><strong>Batch Validation:</strong> Process multiple scans at once. This may take several minutes.</p>
-            <p><strong>Revalidate:</strong> Process images again to get updated OCR results.</p>
-          </div>
+      {/* Custom CSS for row colors */}
+      <style>{`
+        .valid-row {
+          background-color: #f6ffed !important;
         }
-        type="info"
-        showIcon
-        style={{ marginTop: 24, borderRadius: 8 }}
-      />
+        .invalid-row {
+          background-color: #fff1f0 !important;
+        }
+        .valid-row:hover {
+          background-color: #d9f7be !important;
+        }
+        .invalid-row:hover {
+          background-color: #ffccc7 !important;
+        }
+      `}</style>
     </div>
   );
 };
