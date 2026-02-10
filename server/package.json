@@ -1,15 +1,21 @@
 {
   "name": "server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Nuctech Transmission Monitoring System - Backend Server",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "nuctech",
+    "transmission",
+    "monitoring",
+    "container",
+    "scanner"
+  ],
+  "author": "Nuctech Development Team",
   "license": "ISC",
   "dependencies": {
     "axios": "^1.12.2",
