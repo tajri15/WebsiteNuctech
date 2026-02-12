@@ -406,14 +406,31 @@ app.delete('/api/scans/:id', async (req, res) => {
 app.get('/api/container-validation', async (req, res) => {
     try {
         const { startDate, endDate, status } = req.query;
-        let baseQuery = `
-            SELECT id, id_scan, container_no, truck_no, scan_time, status,
-                   image1_path, image2_path, image3_path, image4_path,
-                   image5_path, image6_path, image7_path, image8_path
-            FROM scans
-        `;
+        
+        // CEK DULU apakah kolom id_scan ada
+        const checkColumn = await db.query(`
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'scans' AND column_name = 'id_scan'
+        `);
+        
+        const hasIdScan = checkColumn.rows.length > 0;
+        
+        // Pilih kolom berdasarkan yang tersedia
+        let selectColumns;
+        if (hasIdScan) {
+            selectColumns = `id, id_scan, container_no, truck_no, scan_time, status,
+                             image1_path, image2_path, image3_path, image4_path,
+                             image5_path, image6_path, image7_path, image8_path`;
+        } else {
+            selectColumns = `id, id as id_scan, container_no, truck_no, scan_time, status,
+                             image1_path, image2_path, image3_path, image4_path,
+                             image5_path, image6_path, image7_path, image8_path`;
+        }
+        
+        let baseQuery = `SELECT ${selectColumns} FROM scans`;
         let whereClauses = [];
-        let queryParams  = [];
+        let queryParams = [];
 
         if (startDate && endDate) {
             queryParams.push(startDate, endDate);
