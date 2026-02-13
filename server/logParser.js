@@ -5,72 +5,126 @@ const parseLogLine = (line) => {
   const timestampMatch = line.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}/);
   const logTimestamp = timestampMatch ? timestampMatch[1] : new Date().toISOString();
 
+  // ====================================================
   // PRIORITAS 1: DETEKSI SCAN LINE (YANG BENAR)
+  // ====================================================
   const isScanLine = line.includes('center response:') && 
-                     line.includes('response code: 200') && 
+                     line.includes('response code:') && 
                      line.includes('response text:') &&
-                     !line.includes('**FTP**  UPLOAD'); // PASTIKAN BUKAN FTP
+                     !line.includes('**FTP**  UPLOAD');
   
   if (isScanLine) {
-    // Extract ID Scan dari format: "center response:62001FS02202602130008,"
+    // Extract ID Scan
     const idScanMatch = line.match(/center response:([^,\s]+)/);
     const idScan = idScanMatch ? idScanMatch[1].trim() : null;
     
-    console.log('✅✅✅ SCAN VALID TERDETEKSI - ID:', idScan);
-    console.log('📋 Timestamp:', logTimestamp);
+    // Extract RESPONSE CODE (penting untuk bedakan OK vs NOK)
+    const responseCodeMatch = line.match(/response code:\s*(\d+)/);
+    const responseCode = responseCodeMatch ? parseInt(responseCodeMatch[1]) : null;
+    
+    console.log('✅ SCAN LINE DETECTED - ID:', idScan, '| Response Code:', responseCode);
     
     // Extract JSON dari response text
-    // Format: response text: {"resultCode":false,...}
     const jsonMatch = line.match(/response text:\s*(\{.*\})/);
     
     if (jsonMatch) {
       try {
-        // Parse JSON langsung
         const data = JSON.parse(jsonMatch[1]);
-        console.log('📦 JSON parsed - resultCode:', data.resultCode);
-        return processScanData(data, idScan, logTimestamp);
+        
+        // ================================================
+        // LOGIKA BARU UNTUK OK vs NOK:
+        // ================================================
+        // SCAN OK: response code = 200 DAN resultCode = true
+        // SCAN NOK: response code = 200 TAPI resultCode = false
+        // ATAU response code != 200 (timeout, server down, dll)
+        // ================================================
+        
+        // CASE 1: SCAN NOK - GAGAL TERKIRIM KE SERVER UTAMA
+        if (responseCode !== 200) {
+          console.log('🔴 SCAN NOK - GAGAL TERKIRIM (Response Code:', responseCode, ')');
+          console.log('🔴 ID Scan:', idScan);
+          
+          return {
+            type: 'SCAN',
+            data: {
+              idScan: idScan || 'UNKNOWN',
+              containerNo: 'N/A',
+              truckNo: 'N/A',
+              scanTime: logTimestamp,
+              status: 'NOK',
+              image1_path: null,
+              image2_path: null,
+              image3_path: null,
+              image4_path: null,
+              image5_path: null,
+              image6_path: null,
+              errorMessage: `Failed to send to main server - Response code: ${responseCode}`,
+              rawData: data
+            }
+          };
+        }
+        
+        // CASE 2: SCAN NOK - TERKIRIM TAPI DIREJECT SERVER (resultCode: false)
+        if (data.resultCode === false) {
+          console.log('🔴 SCAN NOK - DIREJECT SERVER:', data.resultDesc);
+          console.log('🔴 ID Scan:', idScan);
+          
+          // AMBIL DATA DARI LOG UNTUK NOK (ada container number, gambar, dll)
+          // Karena scan BERHASIL secara teknis, tapi data ditolak server
+          
+          // Extract data dari line atau dari JSON response
+          let containerNo = 'N/A';
+          let truckNo = 'N/A';
+          
+          // Coba cari container number dari line log
+          // Biasanya ada di response JSON atau di sekitar line
+          
+          return {
+            type: 'SCAN',
+            data: {
+              idScan: idScan || 'UNKNOWN',
+              containerNo: containerNo, // Ini harus diisi dengan container number asli
+              truckNo: truckNo,
+              scanTime: logTimestamp,
+              status: 'NOK', // STATUS NOK KARENA DITOLAK SERVER
+              image1_path: null, // Harusnya ada path gambar
+              image2_path: null,
+              image3_path: null,
+              image4_path: null,
+              image5_path: null,
+              image6_path: null,
+              errorMessage: data.resultDesc || 'Server rejected scan data',
+              rawData: data
+            }
+          };
+        }
+        
+        // CASE 3: SCAN OK - BERHASIL TOTAL (response code 200, resultCode: true)
+        if (responseCode === 200 && data.resultCode === true) {
+          console.log('🟢 SCAN OK - BERHASIL TOTAL');
+          console.log('🟢 ID Scan:', idScan);
+          
+          return processScanData(data, idScan, logTimestamp);
+        }
+        
+        // CASE 4: FORMAT TIDAK DIKENAL
+        console.log('⚠️ Unknown scan format');
+        return null;
         
       } catch (e) {
-        console.log('⚠️ JSON parse error, mencoba perbaiki...');
-        
-        try {
-          // Perbaiki JSON jika rusak
-          let jsonStr = jsonMatch[1];
-          
-          // Tambah kurung tutup jika kurang
-          if (!jsonStr.endsWith('}')) {
-            jsonStr = jsonStr + '}';
-          }
-          
-          // Hapus karakter aneh
-          jsonStr = jsonStr.replace(/[^\x20-\x7E{}:",\[\]truefalsenul]+/g, '');
-          
-          const data = JSON.parse(jsonStr);
-          console.log('✅ JSON berhasil diperbaiki');
-          return processScanData(data, idScan, logTimestamp);
-          
-        } catch (e2) {
-          console.error('❌ GAGAL parse JSON setelah perbaikan:', e2.message);
-          return null; // SKIP LINE INI
-        }
+        console.error('❌ JSON parse error:', e.message);
+        return null;
       }
-    } else {
-      console.log('⚠️ Scan line tanpa JSON, diabaikan');
-      return null;
     }
   }
 
   // ====================================================
   // PRIORITAS 2: DETEKSI FTP UPLOAD
   // ====================================================
-  // Harus mengandung "**FTP**  UPLOAD" (exact match)
   if (line.includes('**FTP**  UPLOAD')) {
-    console.log('📤 FTP UPLOAD TERDETEKSI');
+    console.log('📤 FTP UPLOAD DETECTED');
     
-    // Extract IP dari "---TO:10.226.62.31\home\..."
     const ipMatch = line.match(/---TO:([^\\]+)/);
-    
-    // Extract filename dari "---FROM:D:/Image/.../filename.jpg"
     const fileMatch = line.match(/---FROM:.*\\([^\\]+\.(jpg|png|jpeg|img))/i);
     
     return {
@@ -85,26 +139,21 @@ const parseLogLine = (line) => {
   }
 
   // ====================================================
-  // PRIORITAS 3: DETEKSI CONNECTION LOGS
+  // PRIORITAS 3: DETEKSI ERROR FTP (No space left on device)
   // ====================================================
-  if (line.includes('login') || 
-      line.includes('logout') || 
-      line.includes('connected') || 
-      line.includes('disconnected') ||
-      line.includes('FTP connection')) {
+  if (line.includes('No space left on device') || line.includes('550')) {
+    console.log('⚠️ FTP ERROR DETECTED - No space');
     
     return {
-      type: 'CONNECTION',
+      type: 'FTP_ERROR',
       data: {
         message: line.trim(),
-        timestamp: logTimestamp
+        timestamp: logTimestamp,
+        error: 'No space left on device'
       }
     };
   }
 
-  // ====================================================
-  // DEFAULT: SYSTEM LOG (DIABAIKAN)
-  // ====================================================
   return { 
     type: 'SYSTEM_LOG',
     data: {
@@ -116,96 +165,40 @@ const parseLogLine = (line) => {
 };
 
 // ====================================================
-// FUNGSI PROCESS SCAN DATA
+// FUNGSI PROCESS SCAN DATA (UNTUK SCAN OK)
 // ====================================================
 function processScanData(data, idScan, logTimestamp) {
+  console.log('🟢 PROCESSING OK SCAN - ID:', idScan);
   
-  // CASE 1: SCAN NOK (resultCode: false)
-  if (data.resultCode === false) {
-    console.log('🔴 SCAN NOK - ID:', idScan);
-    console.log('🔴 Error:', data.resultDesc);
-    
+  let resultData = data.resultData;
+  
+  if (typeof resultData === 'string' && resultData.trim().startsWith('{')) {
+    try {
+      resultData = JSON.parse(resultData);
+    } catch (e) {}
+  }
+
+  if (resultData && typeof resultData === 'object') {
     return {
       type: 'SCAN',
       data: {
-        idScan: idScan || 'UNKNOWN',
-        containerNo: 'N/A',
-        truckNo: 'N/A',
-        scanTime: logTimestamp,
-        status: 'NOK',
-        image1_path: null,
-        image2_path: null,
-        image3_path: null,
-        image4_path: null,
-        image5_path: null,
-        image6_path: null,
-        errorMessage: data.resultDesc || 'Scan failed',
-        rawData: data
+        idScan: idScan || resultData.PICNO || resultData.ID || 'UNKNOWN',
+        containerNo: resultData.CONTAINER_NO || 'N/A',
+        truckNo: resultData.FYCO_PRESENT || resultData.TRUCK_NO || 'N/A',
+        scanTime: resultData.SCANTIME || logTimestamp,
+        status: 'OK',
+        image1_path: resultData.IMAGE1_PATH || null,
+        image2_path: resultData.IMAGE2_PATH || null,
+        image3_path: resultData.IMAGE3_PATH || null,
+        image4_path: resultData.IMAGE4_PATH || null,
+        image5_path: resultData.IMAGE5_PATH || null,
+        image6_path: resultData.IMAGE6_PATH || null,
+        errorMessage: null,
+        rawData: resultData
       }
     };
   }
-
-  // CASE 2: SCAN OK (resultCode: true)
-  if (data.resultCode === true) {
-    console.log('🟢 SCAN OK - ID:', idScan);
-    
-    let resultData = data.resultData;
-    
-    // Parse resultData jika berupa string JSON
-    if (typeof resultData === 'string' && resultData.trim().startsWith('{')) {
-      try {
-        resultData = JSON.parse(resultData);
-        console.log('📦 resultData parsed from string');
-      } catch (e) {
-        console.log('⚠️ resultData bukan JSON string');
-      }
-    }
-
-    // Jika resultData adalah object yang valid
-    if (resultData && typeof resultData === 'object') {
-      return {
-        type: 'SCAN',
-        data: {
-          idScan: idScan || resultData.PICNO || resultData.ID || 'UNKNOWN',
-          containerNo: resultData.CONTAINER_NO || 'N/A',
-          truckNo: resultData.FYCO_PRESENT || resultData.TRUCK_NO || 'N/A',
-          scanTime: resultData.SCANTIME || logTimestamp,
-          status: 'OK',
-          image1_path: resultData.IMAGE1_PATH || null,
-          image2_path: resultData.IMAGE2_PATH || null,
-          image3_path: resultData.IMAGE3_PATH || null,
-          image4_path: resultData.IMAGE4_PATH || null,
-          image5_path: resultData.IMAGE5_PATH || null,
-          image6_path: resultData.IMAGE6_PATH || null,
-          errorMessage: null,
-          rawData: resultData
-        }
-      };
-    } else {
-      // Fallback jika resultData tidak ada
-      return {
-        type: 'SCAN',
-        data: {
-          idScan: idScan || 'UNKNOWN',
-          containerNo: 'N/A',
-          truckNo: 'N/A',
-          scanTime: logTimestamp,
-          status: 'OK',
-          image1_path: null,
-          image2_path: null,
-          image3_path: null,
-          image4_path: null,
-          image5_path: null,
-          image6_path: null,
-          errorMessage: null,
-          rawData: data
-        }
-      };
-    }
-  }
-
-  // CASE 3: Format tidak dikenal
-  console.log('⚠️ Unknown scan format:', data);
+  
   return null;
 }
 
