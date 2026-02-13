@@ -21,7 +21,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// Simpan waktu start server (harus di atas calculateUptime)
+// Simpan waktu start server
 let serverStartTime = new Date();
 
 // --- Membaca Konfigurasi ---
@@ -53,7 +53,7 @@ try {
 
 // --- Middleware ---
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 const imageFolderPath = '\\\\192.111.111.80\\Image';
 app.use('/images', express.static(imageFolderPath));
 console.log(`🖼️  Menyajikan gambar dari folder: ${imageFolderPath}`);
@@ -71,7 +71,7 @@ function calculateUptime() {
     return `${days} days ${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}`;
 }
 
-// Helper validasi format container (digunakan oleh API validasi)
+// Validasi format container
 function validateContainerFormat(containerNo) {
     if (!containerNo || containerNo.trim() === '' ||
         containerNo.toUpperCase().includes('SCAN FAILED') ||
@@ -85,6 +85,37 @@ function validateContainerFormat(containerNo) {
         return { isValid: true, reason: 'valid' };
     }
     return { isValid: false, reason: 'invalid_format' };
+}
+
+// Hitung Levenshtein distance untuk perbandingan string
+function levenshteinDistance(a, b) {
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i-1) === a.charAt(j-1)) {
+                matrix[i][j] = matrix[i-1][j-1];
+            } else {
+                matrix[i][j] = Math.min(
+                    matrix[i-1][j-1] + 1,
+                    matrix[i][j-1] + 1,
+                    matrix[i-1][j] + 1
+                );
+            }
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
+function calculateSimilarity(str1, str2) {
+    if (!str1 || !str2) return 0;
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    if (longer.length === 0) return 100;
+    const distance = levenshteinDistance(longer, shorter);
+    return ((longer.length - distance) / longer.length) * 100;
 }
 
 // =======================================================================
@@ -168,7 +199,6 @@ app.post('/api/scans/:id/resend', async (req, res) => {
                 FYCO_PRESENT: scanData.truck_no || "0000000",
                 WORKFLOW: "",
                 UPDATE_TIME: new Date().toISOString().replace('T', ' ').substring(0, 19),
-                RESPON_TPKS_API: "OK",
                 IMAGE1_PATH: scanData.image1_path || "",
                 IMAGE2_PATH: scanData.image2_path || "",
                 IMAGE3_PATH: scanData.image3_path || "",
@@ -309,16 +339,6 @@ app.get('/api/config', (req, res) => {
     }
 });
 
-// --- Update Config ---
-app.put('/api/config/update', async (req, res) => {
-    try {
-        const { setting, value } = req.body;
-        res.json({ success: true, message: `Configuration ${setting} updated successfully`, updatedSetting: setting, newValue: value, timestamp: new Date().toISOString() });
-    } catch (err) {
-        res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
-    }
-});
-
 // --- Export CSV ---
 app.get('/api/export/csv-v2', async (req, res) => {
     try {
@@ -347,7 +367,7 @@ app.get('/api/export/csv-v2', async (req, res) => {
         if (status === 'ok' || logType === 'ok') filename = `scan_data_ok_${timestamp}.csv`;
         else if (status === 'nok' || logType === 'nok') filename = `scan_data_nok_${timestamp}.csv`;
 
-        let csvContent = 'NO,ID SCAN,NO. CONTAINER,NO. TRUCK,SCAN TIME,UPDATE TIME,STATUS,IMAGE1_PATH,IMAGE2_PATH,IMAGE3_PATH,IMAGE4_PATH\r\n';
+        let csvContent = 'NO,ID SCAN,NO. CONTAINER,NO. TRUCK,SCAN TIME,UPDATE TIME,STATUS,VALIDATION_STATUS,CONFIDENCE,IMAGE1_PATH,IMAGE2_PATH,IMAGE3_PATH,IMAGE4_PATH\r\n';
         data.forEach((item, i) => {
             csvContent += [
                 i + 1,
@@ -357,6 +377,8 @@ app.get('/api/export/csv-v2', async (req, res) => {
                 `"${item.scan_time ? new Date(item.scan_time).toLocaleString('id-ID') : '-'}"`,
                 `"${item.updated_at ? new Date(item.updated_at).toLocaleString('id-ID') : '-'}"`,
                 `"${item.status || '-'}"`,
+                `"${item.validation_status || 'UNKNOWN'}"`,
+                `"${item.validation_confidence || '0'}%"`,
                 `"${item.image1_path || '-'}"`,
                 `"${item.image2_path || '-'}"`,
                 `"${item.image3_path || '-'}"`,
@@ -371,9 +393,6 @@ app.get('/api/export/csv-v2', async (req, res) => {
         res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
     }
 });
-
-// --- Gambar static tambahan ---
-app.use('/images', express.static(path.join(__dirname, 'images')));
 
 // --- GET Scan Detail ---
 app.get('/api/scans/:id', async (req, res) => {
@@ -399,7 +418,7 @@ app.delete('/api/scans/:id', async (req, res) => {
 });
 
 // =======================================================================
-// === API CONTAINER VALIDATION (BARU) ===
+// === API CONTAINER VALIDATION (DENGAN AUTO DETECT) ===
 // =======================================================================
 
 // GET data validasi container
@@ -421,11 +440,15 @@ app.get('/api/container-validation', async (req, res) => {
         if (hasIdScan) {
             selectColumns = `id, id_scan, container_no, truck_no, scan_time, status,
                              image1_path, image2_path, image3_path, image4_path,
-                             image5_path, image6_path, image7_path, image8_path`;
+                             image5_path, image6_path, image7_path, image8_path,
+                             validation_status, validation_confidence, image_text_detected,
+                             manual_validated, manual_validation_time, original_ocr_result`;
         } else {
             selectColumns = `id, id as id_scan, container_no, truck_no, scan_time, status,
                              image1_path, image2_path, image3_path, image4_path,
-                             image5_path, image6_path, image7_path, image8_path`;
+                             image5_path, image6_path, image7_path, image8_path,
+                             validation_status, validation_confidence, image_text_detected,
+                             manual_validated, manual_validation_time, original_ocr_result`;
         }
         
         let baseQuery = `SELECT ${selectColumns} FROM scans`;
@@ -444,83 +467,146 @@ app.get('/api/container-validation', async (req, res) => {
         baseQuery += ' ORDER BY scan_time DESC';
 
         const result = await db.query(baseQuery, queryParams);
-        res.json({ success: true, data: result.rows, total: result.rows.length });
+        
+        // Enrich data dengan validasi format
+        const enriched = result.rows.map(item => {
+            const validation = validateContainerFormat(item.container_no);
+            const images = [
+                item.image1_path, item.image2_path, item.image3_path,
+                item.image4_path, item.image5_path, item.image6_path,
+                item.image7_path, item.image8_path
+            ].filter(Boolean);
+            
+            return {
+                ...item,
+                isValid: validation.isValid,
+                validationReason: validation.reason,
+                confidence: validation.isValid ? 95 : 0,
+                images,
+                // Status validasi gambar
+                imageValidationStatus: item.validation_status || 'UNCHECKED',
+                imageValidationConfidence: item.validation_confidence || 0,
+                imageTextDetected: item.image_text_detected || null
+            };
+        });
+        
+        res.json({ success: true, data: enriched, total: enriched.length });
     } catch (err) {
         console.error("❌ /api/container-validation:", err);
         res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
     }
 });
 
-// GET statistik validasi container
+// API untuk menyimpan hasil validasi gambar (dari Tesseract.js)
+app.post('/api/update-validation-result', async (req, res) => {
+    try {
+        const { scanId, imageText, isMatch, similarity } = req.body;
+        
+        console.log(`📝 Updating validation result for scan ${scanId}:`);
+        console.log(`   - OCR Database: ${req.body.ocrResult || 'N/A'}`);
+        console.log(`   - Text from Image: ${imageText}`);
+        console.log(`   - Match: ${isMatch ? 'YES' : 'NO'}, Similarity: ${similarity}%`);
+        
+        const validationStatus = isMatch ? 'MATCH' : 'MISMATCH';
+        
+        await db.query(
+            `UPDATE scans 
+             SET image_text_detected = $1,
+                 validation_confidence = $2,
+                 validation_status = $3,
+                 validation_time = NOW()
+             WHERE id = $4`,
+            [imageText, similarity, validationStatus, scanId]
+        );
+        
+        res.json({ 
+            success: true, 
+            message: isMatch ? 'Container number matches image' : 'Container number does not match image',
+            validationStatus,
+            similarity 
+        });
+        
+    } catch (err) {
+        console.error('❌ Error updating validation result:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// API untuk validasi manual (user menginput nomor container yang benar)
+app.post('/api/manual-container-validation', async (req, res) => {
+    try {
+        const { scanId, correctContainerNo } = req.body;
+        
+        // Ambil data lama dulu
+        const oldData = await db.query('SELECT container_no FROM scans WHERE id = $1', [scanId]);
+        const oldContainerNo = oldData.rows[0]?.container_no;
+        
+        // Update database dengan nomor container yang benar
+        const result = await db.query(
+            `UPDATE scans 
+             SET container_no = $1,
+                 manual_validated = true,
+                 manual_validation_time = NOW(),
+                 original_ocr_result = $2,
+                 validation_status = 'MANUAL_FIX',
+                 validation_confidence = 100
+             WHERE id = $3
+             RETURNING *`,
+            [correctContainerNo.toUpperCase(), oldContainerNo, scanId]
+        );
+        
+        console.log(`✏️ Manual validation for scan ${scanId}:`);
+        console.log(`   - Old: ${oldContainerNo}`);
+        console.log(`   - New: ${correctContainerNo.toUpperCase()}`);
+        
+        res.json({
+            success: true,
+            message: 'Container number updated successfully',
+            data: result.rows[0]
+        });
+        
+    } catch (err) {
+        console.error('❌ Error manual validation:', err);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Internal server error',
+            message: err.message 
+        });
+    }
+});
+
+// API untuk get statistik validasi
 app.get('/api/container-validation/statistics', async (req, res) => {
     try {
         const { startDate, endDate } = req.query;
-        let dateFilter  = '';
+        
+        let dateFilter = '';
         let queryParams = [];
+        
         if (startDate && endDate) {
             queryParams.push(startDate, endDate);
             dateFilter = `WHERE scan_time BETWEEN $1 AND $2`;
         }
-
+        
         const result = await db.query(`
             SELECT
                 COUNT(*) as total,
-                COUNT(CASE
-                    WHEN container_no IS NOT NULL AND container_no != ''
-                    AND container_no NOT ILIKE '%scan failed%'
-                    AND container_no NOT ILIKE '%failed%'
-                    AND (container_no ~ '^[A-Z]{4}[0-9]{7}$'
-                         OR container_no ~ '^[A-Z]{4}[0-9]{7}/[A-Z]{4}[0-9]{7}$')
-                    THEN 1 END) as valid,
-                COUNT(CASE
-                    WHEN container_no IS NULL OR container_no = ''
-                    OR container_no ILIKE '%scan failed%'
-                    OR container_no ILIKE '%failed%'
-                    OR (container_no !~ '^[A-Z]{4}[0-9]{7}$'
-                        AND container_no !~ '^[A-Z]{4}[0-9]{7}/[A-Z]{4}[0-9]{7}$')
-                    THEN 1 END) as invalid
+                COUNT(CASE WHEN validation_status = 'MATCH' THEN 1 END) as match_count,
+                COUNT(CASE WHEN validation_status = 'MISMATCH' THEN 1 END) as mismatch_count,
+                COUNT(CASE WHEN validation_status = 'MANUAL_FIX' THEN 1 END) as manual_fix_count,
+                COUNT(CASE WHEN validation_status IS NULL THEN 1 END) as unchecked_count,
+                AVG(CASE WHEN validation_confidence IS NOT NULL THEN validation_confidence ELSE 0 END) as avg_confidence
             FROM scans ${dateFilter}
         `, queryParams);
-
-        const total = parseInt(result.rows[0].total);
-        const valid = parseInt(result.rows[0].valid);
+        
         res.json({
             success: true,
-            statistics: {
-                total,
-                valid,
-                invalid: total - valid,
-                validPercentage: total > 0 ? parseFloat(((valid / total) * 100).toFixed(2)) : 0
-            }
+            statistics: result.rows[0]
         });
+        
     } catch (err) {
-        res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
-    }
-});
-
-// POST validasi container (single) via OCR
-app.post('/api/validate-container-ocr', async (req, res) => {
-    try {
-        const { containerId } = req.body;
-        const result = await db.query(
-            `SELECT id, container_no, image1_path, image2_path, image3_path,
-                    image4_path, image5_path, image6_path, image7_path, image8_path
-             FROM scans WHERE id = $1`,
-            [containerId]
-        );
-        if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Container not found' });
-
-        const container = result.rows[0];
-        const images = [
-            container.image1_path, container.image2_path, container.image3_path,
-            container.image4_path, container.image5_path, container.image6_path,
-            container.image7_path, container.image8_path
-        ].filter(Boolean);
-
-        const isValid = validateContainerFormat(container.container_no);
-        res.json({ success: true, containerId: container.id, containerNo: container.container_no, isValid: isValid.isValid, reason: isValid.reason, imageCount: images.length, images });
-    } catch (err) {
-        res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
+        console.error('❌ Error getting validation statistics:', err);
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -558,7 +644,14 @@ app.post('/api/debug/fix-schema', async (req, res) => {
             ADD COLUMN IF NOT EXISTS image5_path      TEXT,
             ADD COLUMN IF NOT EXISTS image6_path      TEXT,
             ADD COLUMN IF NOT EXISTS image7_path      TEXT,
-            ADD COLUMN IF NOT EXISTS image8_path      TEXT
+            ADD COLUMN IF NOT EXISTS image8_path      TEXT,
+            ADD COLUMN IF NOT EXISTS validation_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS validation_confidence DECIMAL(5,2),
+            ADD COLUMN IF NOT EXISTS validation_time TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS image_text_detected TEXT,
+            ADD COLUMN IF NOT EXISTS manual_validated BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS manual_validation_time TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS original_ocr_result VARCHAR(50)
         `);
         res.json({ success: true, message: 'Schema checked/fixed successfully' });
     } catch (err) {
@@ -610,69 +703,54 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                     for (const line of lines) {
                         try {
                             const parsed = parseLogLine(line);
-                            if (parsed.type === 'SCAN') {
+                            if (parsed && parsed.type === 'SCAN') {
                                 const pData = parsed.data;
                                 try {
                                     const dbRes = await db.query(
-                                        `INSERT INTO scans(id_scan,container_no,truck_no,scan_time,status,image1_path,image2_path,image3_path,image4_path,image5_path,image6_path)
-                                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-                                        [pData.idScan, pData.containerNo, pData.truckNo, pData.scanTime, pData.status,
-                                         pData.image1_path, pData.image2_path, pData.image3_path, pData.image4_path,
-                                         pData.image5_path || null, pData.image6_path || null]
+                                        `INSERT INTO scans(
+                                            id_scan, container_no, truck_no, scan_time, 
+                                            status, error_message,
+                                            image1_path, image2_path, image3_path, 
+                                            image4_path, image5_path, image6_path
+                                         )
+                                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) 
+                                         RETURNING *`,
+                                        [
+                                            pData.idScan, pData.containerNo, pData.truckNo, 
+                                            pData.scanTime, pData.status, pData.errorMessage,
+                                            pData.image1_path, pData.image2_path, pData.image3_path,
+                                            pData.image4_path, pData.image5_path, pData.image6_path
+                                        ]
                                     );
                                     const newScan = dbRes.rows[0];
-                                    console.log(`✅ Scan saved: ID ${newScan.id}, Container: ${newScan.container_no}`);
+                                    console.log(`✅ Scan saved: ID ${newScan.id}, Container: ${newScan.container_no}, Status: ${newScan.status}`);
                                     io.emit('new_scan', newScan);
 
+                                    // Update stats
                                     const [tr, ok, nok] = await Promise.all([
                                         db.query('SELECT COUNT(*) FROM scans'),
                                         db.query(`SELECT COUNT(*) FROM scans WHERE status='OK'`),
                                         db.query(`SELECT COUNT(*) FROM scans WHERE status='NOK'`)
                                     ]);
-                                    io.emit('stats_update', { total: parseInt(tr.rows[0].count), ok: parseInt(ok.rows[0].count), nok: parseInt(nok.rows[0].count) });
+                                    io.emit('stats_update', { 
+                                        total: parseInt(tr.rows[0].count), 
+                                        ok: parseInt(ok.rows[0].count), 
+                                        nok: parseInt(nok.rows[0].count) 
+                                    });
 
-                                    io.emit('api_update', {
-                                        apiServer: { status: 'processing', lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Processing JSON data from scan', ip: ftpConfig.server2_ip, type: 'HTTP API', currentActivity: 'Memproses data JSON scan' },
-                                        ftpServer: { status: 'connected',  lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Ready for next upload',            ip: ftpConfig.server1_ip, type: 'FTP',      currentActivity: 'Siap upload berikutnya' }
-                                    });
-                                    setTimeout(() => {
-                                        io.emit('api_update', {
-                                            apiServer: { status: 'standby',   lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Ready to receive JSON data', ip: ftpConfig.server2_ip, type: 'HTTP API', currentActivity: 'Menunggu data JSON' },
-                                            ftpServer: { status: 'connected', lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Monitoring for uploads',      ip: ftpConfig.server1_ip, type: 'FTP',      currentActivity: 'Monitoring upload' }
-                                        });
-                                    }, 2000);
                                 } catch (dbErr) {
-                                    if (dbErr.message.includes('column') && dbErr.message.includes('does not exist')) {
-                                        try {
-                                            const fb = await db.query(
-                                                `INSERT INTO scans(id_scan,container_no,truck_no,scan_time,status,image1_path,image2_path,image3_path,image4_path)
-                                                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-                                                [pData.idScan, pData.containerNo, pData.truckNo, pData.scanTime, pData.status,
-                                                 pData.image1_path, pData.image2_path, pData.image3_path, pData.image4_path]
-                                            );
-                                            io.emit('new_scan', fb.rows[0]);
-                                        } catch (fbErr) { console.error('❌ Fallback failed:', fbErr); }
-                                    }
+                                    console.error('❌ Database insert error:', dbErr.message);
                                 }
-                            } else if (parsed.type === 'FTP_UPLOAD') {
-                                io.emit('ftp_update', {
-                                    ftpServer: { status: 'uploading', lastActivity: new Date().toLocaleTimeString('id-ID'), details: `Uploading ${parsed.data.file}`, ip: parsed.data.ip, type: 'FTP', currentActivity: 'Mengupload file gambar' },
-                                    apiServer: { status: 'standby',   lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Ready to receive JSON data',   ip: ftpConfig.server2_ip, type: 'HTTP API', currentActivity: 'Menunggu data JSON' }
-                                });
-                                setTimeout(() => {
-                                    io.emit('ftp_update', {
-                                        ftpServer: { status: 'connected', lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Upload completed',           ip: ftpConfig.server1_ip, type: 'FTP', currentActivity: 'Upload selesai' },
-                                        apiServer: { status: 'standby',   lastActivity: new Date().toLocaleTimeString('id-ID'), details: 'Ready to receive JSON data', ip: ftpConfig.server2_ip, type: 'HTTP API', currentActivity: 'Menunggu data JSON' }
-                                    });
-                                }, 3000);
                             }
-                        } catch (lineErr) { console.error('❌ Line error:', lineErr); }
+                        } catch (lineErr) { 
+                            console.error('❌ Line error:', lineErr); 
+                        }
                     }
                     lastSize = currentSize;
-                } catch (processErr) { console.error('❌ Process error:', processErr); }
+                } catch (processErr) { 
+                    console.error('❌ Process error:', processErr); 
+                }
             });
-
-            stream.on('error', (e) => { console.error('❌ Stream error:', e); lastSize = currentSize; });
         } catch (err) {
             console.error("❌ Watcher change error:", err);
             try { lastSize = fs.statSync(filePath).size; } catch (e) {}
@@ -699,11 +777,12 @@ app.get('/', (req, res) => {
             scans: 'GET /api/scans', scanDetail: 'GET /api/scans/:id',
             resend: 'POST /api/scans/:id/resend', deleteScan: 'DELETE /api/scans/:id',
             stats: 'GET /api/stats', statsDaily: 'GET /api/stats/daily', statsSummary: 'GET /api/stats/summary',
-            initialData: 'GET /api/initial-data', config: 'GET /api/config', updateConfig: 'PUT /api/config/update',
+            initialData: 'GET /api/initial-data', config: 'GET /api/config',
             export: 'GET /api/export/csv-v2', images: 'GET /images/*',
             containerValidation: 'GET /api/container-validation',
             containerValidationStats: 'GET /api/container-validation/statistics',
-            validateOcr: 'POST /api/validate-container-ocr',
+            updateValidation: 'POST /api/update-validation-result',
+            manualValidation: 'POST /api/manual-container-validation',
             debug: { dbSchema: 'GET /api/debug/db-schema', recentScans: 'GET /api/debug/recent-scans', fixSchema: 'POST /api/debug/fix-schema' }
         }
     });
@@ -730,30 +809,12 @@ server.listen(PORT, () => {
     console.log(`🚀 Server: http://localhost:${PORT}`);
     console.log(`🚀 Start : ${serverStartTime.toLocaleString('id-ID')}`);
     console.log(`📊 ==========================================`);
-    console.log(`📊 API Endpoints (Existing):`);
+    console.log(`📊 API Endpoints:`);
     console.log(`📊   GET    /api/health`);
     console.log(`📊   GET    /api/scans`);
-    console.log(`📊   GET    /api/scans/:id`);
-    console.log(`📊   POST   /api/scans/:id/resend`);
-    console.log(`📊   DELETE /api/scans/:id`);
-    console.log(`📊   GET    /api/stats`);
-    console.log(`📊   GET    /api/stats/daily`);
-    console.log(`📊   GET    /api/stats/summary`);
-    console.log(`📊   GET    /api/initial-data`);
-    console.log(`📊   GET    /api/config`);
-    console.log(`📊   PUT    /api/config/update`);
-    console.log(`📊   GET    /api/export/csv-v2`);
-    console.log(`📊   GET    /images/*`);
-    console.log(`📊 ==========================================`);
-    console.log(`✅ API Endpoints (Container Validation - NEW):`);
-    console.log(`✅   GET    /api/container-validation`);
-    console.log(`✅   GET    /api/container-validation/statistics`);
-    console.log(`✅   POST   /api/validate-container-ocr`);
-    console.log(`📊 ==========================================`);
-    console.log(`📊 Debug Endpoints:`);
-    console.log(`📊   GET    /api/debug/db-schema`);
-    console.log(`📊   GET    /api/debug/recent-scans`);
-    console.log(`📊   POST   /api/debug/fix-schema`);
+    console.log(`📊   GET    /api/container-validation (dengan AUTO DETECT support)`);
+    console.log(`📊   POST   /api/update-validation-result (untuk Tesseract.js)`);
+    console.log(`📊   POST   /api/manual-container-validation`);
     console.log(`👀 Log monitoring: ${fs.existsSync(LOG_FILE_PATH) ? 'AKTIF ✅' : 'NON-AKTIF ⚠️'}`);
     console.log(`==========================================\n`);
 });
