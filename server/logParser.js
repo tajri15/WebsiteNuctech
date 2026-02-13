@@ -1,139 +1,129 @@
 const parseLogLine = (line) => {
   console.log('🔍 Parsing line:', line.substring(0, 200) + '...');
 
-  // Extract ID Scan dari log line (sebelum response JSON)
-  const idScanMatch = line.match(/center response:([^,]+),/);
-  const idScan = idScanMatch ? idScanMatch[1].trim() : null;
-
   // Extract timestamp dari log line
   const timestampMatch = line.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}/);
   const logTimestamp = timestampMatch ? timestampMatch[1] : new Date().toISOString();
 
-  // 1. Cek untuk log FTP Upload
-  if ((line.includes('FTP') && line.includes('UPLOAD')) || 
-      (line.includes('ftp') && line.includes('upload')) ||
-      (line.includes('Ftp') && line.includes('Upload'))) {
+  // PRIORITAS 1: DETEKSI SCAN LINE (YANG BENAR)
+  const isScanLine = line.includes('center response:') && 
+                     line.includes('response code: 200') && 
+                     line.includes('response text:') &&
+                     !line.includes('**FTP**  UPLOAD'); // PASTIKAN BUKAN FTP
+  
+  if (isScanLine) {
+    // Extract ID Scan dari format: "center response:62001FS02202602130008,"
+    const idScanMatch = line.match(/center response:([^,\s]+)/);
+    const idScan = idScanMatch ? idScanMatch[1].trim() : null;
     
-    const ipMatch = line.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
-    const fileMatch = line.match(/([\w\-\.]+\.(jpg|png|jpeg|txt|log|zip|rar|img))/i);
+    console.log('✅✅✅ SCAN VALID TERDETEKSI - ID:', idScan);
+    console.log('📋 Timestamp:', logTimestamp);
+    
+    // Extract JSON dari response text
+    // Format: response text: {"resultCode":false,...}
+    const jsonMatch = line.match(/response text:\s*(\{.*\})/);
+    
+    if (jsonMatch) {
+      try {
+        // Parse JSON langsung
+        const data = JSON.parse(jsonMatch[1]);
+        console.log('📦 JSON parsed - resultCode:', data.resultCode);
+        return processScanData(data, idScan, logTimestamp);
+        
+      } catch (e) {
+        console.log('⚠️ JSON parse error, mencoba perbaiki...');
+        
+        try {
+          // Perbaiki JSON jika rusak
+          let jsonStr = jsonMatch[1];
+          
+          // Tambah kurung tutup jika kurang
+          if (!jsonStr.endsWith('}')) {
+            jsonStr = jsonStr + '}';
+          }
+          
+          // Hapus karakter aneh
+          jsonStr = jsonStr.replace(/[^\x20-\x7E{}:",\[\]truefalsenul]+/g, '');
+          
+          const data = JSON.parse(jsonStr);
+          console.log('✅ JSON berhasil diperbaiki');
+          return processScanData(data, idScan, logTimestamp);
+          
+        } catch (e2) {
+          console.error('❌ GAGAL parse JSON setelah perbaikan:', e2.message);
+          return null; // SKIP LINE INI
+        }
+      }
+    } else {
+      console.log('⚠️ Scan line tanpa JSON, diabaikan');
+      return null;
+    }
+  }
+
+  // ====================================================
+  // PRIORITAS 2: DETEKSI FTP UPLOAD
+  // ====================================================
+  // Harus mengandung "**FTP**  UPLOAD" (exact match)
+  if (line.includes('**FTP**  UPLOAD')) {
+    console.log('📤 FTP UPLOAD TERDETEKSI');
+    
+    // Extract IP dari "---TO:10.226.62.31\home\..."
+    const ipMatch = line.match(/---TO:([^\\]+)/);
+    
+    // Extract filename dari "---FROM:D:/Image/.../filename.jpg"
+    const fileMatch = line.match(/---FROM:.*\\([^\\]+\.(jpg|png|jpeg|img))/i);
     
     return {
       type: 'FTP_UPLOAD',
       data: {
-        ip: ipMatch ? ipMatch[1] : 'Unknown IP',
+        ip: ipMatch ? ipMatch[1].trim() : '10.226.62.31',
         file: fileMatch ? fileMatch[1] : 'Unknown file',
-        timestamp: new Date().toISOString(),
+        timestamp: logTimestamp,
         rawMessage: line.trim()
       }
     };
   }
 
-  // 2. PATTERN UTAMA - Cari response JSON dengan berbagai pattern
-  const responsePatterns = [
-    /center response:.*?response text:\s*(\{.*?})\s*$/i,  // Pattern utama
-    /response text:\s*(\{.*?})\s*$/i,  // Fallback 1
-    /(\{"resultCode":(true|false).*?})/i  // Fallback 2
-  ];
-
-  for (const pattern of responsePatterns) {
-    const match = line.match(pattern);
-    if (match) {
-      let jsonString = match[1];
-      console.log('✅ Pattern matched:', pattern.toString());
-      console.log('📋 Raw JSON string:', jsonString);
-
-      try {
-        // Coba parse JSON langsung
-        const data = JSON.parse(jsonString);
-        console.log('✅ JSON parsed successfully - resultCode:', data.resultCode);
-
-        return processScanData(data, idScan, logTimestamp);
-
-      } catch (parseError) {
-        console.log('⚠️ First parse failed, trying to fix JSON...');
-        
-        // Coba perbaiki JSON yang rusak
-        try {
-          // Tambahkan kurung tutup jika diperlukan
-          if (!jsonString.endsWith('}')) {
-            jsonString = jsonString + '}';
-            console.log('🔧 Fixed JSON - added closing brace');
-          }
-          
-          // Hapus karakter newline atau spasi berlebih
-          jsonString = jsonString.trim();
-          
-          const data = JSON.parse(jsonString);
-          console.log('✅ JSON fixed and parsed successfully - resultCode:', data.resultCode);
-          
-          return processScanData(data, idScan, logTimestamp);
-          
-        } catch (fixError) {
-          console.error('❌ JSON fix failed:', fixError.message);
-          continue; // Coba pattern berikutnya
-        }
-      }
-    }
-  }
-
-  // 3. FALLBACK - Cari JSON secara manual di line
-  const jsonStart = line.indexOf('{"resultCode":');
-  if (jsonStart !== -1) {
-    const jsonSubstring = line.substring(jsonStart);
-    const jsonEnd = jsonSubstring.indexOf('}');
+  // ====================================================
+  // PRIORITAS 3: DETEKSI CONNECTION LOGS
+  // ====================================================
+  if (line.includes('login') || 
+      line.includes('logout') || 
+      line.includes('connected') || 
+      line.includes('disconnected') ||
+      line.includes('FTP connection')) {
     
-    if (jsonEnd !== -1) {
-      let jsonString = jsonSubstring.substring(0, jsonEnd + 1);
-      console.log('🔄 Manual JSON extraction:', jsonString);
-      
-      try {
-        const data = JSON.parse(jsonString);
-        console.log('✅ Manual JSON parsed - resultCode:', data.resultCode);
-        
-        return processScanData(data, idScan, logTimestamp);
-        
-      } catch (error) {
-        console.log('❌ Manual JSON parse failed');
-      }
-    }
-  }
-
-  // 4. Cek untuk connection logs
-  if (line.includes('connected') || line.includes('connection') || 
-      line.includes('Connected') || line.includes('connect') ||
-      line.includes('disconnect') || line.includes('Disconnected')) {
     return {
       type: 'CONNECTION',
       data: {
         message: line.trim(),
-        timestamp: new Date().toISOString()
+        timestamp: logTimestamp
       }
     };
   }
 
-  // 5. Debug: Tampilkan line yang mengandung kata kunci scan tapi tidak terdeteksi
-  if (line.includes('center response') || line.includes('resultCode') || 
-      line.includes('response text')) {
-    console.log('⚠️  POTENTIAL SCAN LINE NOT PARSED:', line.substring(0, 300));
-  }
-
-  // 6. Jika bukan keduanya, anggap sebagai log system
+  // ====================================================
+  // DEFAULT: SYSTEM LOG (DIABAIKAN)
+  // ====================================================
   return { 
     type: 'SYSTEM_LOG',
     data: {
       message: line.trim(),
-      timestamp: new Date().toISOString(),
+      timestamp: logTimestamp,
       ignored: true
     }
   };
 };
 
-// 🔧 FUNGSI BARU UNTUK PROCESS SCAN DATA
+// ====================================================
+// FUNGSI PROCESS SCAN DATA
+// ====================================================
 function processScanData(data, idScan, logTimestamp) {
-  // Handle case NOK (resultCode: false)
+  
+  // CASE 1: SCAN NOK (resultCode: false)
   if (data.resultCode === false) {
-    console.log('🔴 PROCESSING NOK SCAN - ID:', idScan);
-    console.log('🔴 Error Description:', data.resultDesc);
+    console.log('🔴 SCAN NOK - ID:', idScan);
+    console.log('🔴 Error:', data.resultDesc);
     
     return {
       type: 'SCAN',
@@ -155,9 +145,9 @@ function processScanData(data, idScan, logTimestamp) {
     };
   }
 
-  // Handle case OK (resultCode: true)
+  // CASE 2: SCAN OK (resultCode: true)
   if (data.resultCode === true) {
-    console.log('🟢 PROCESSING OK SCAN - ID:', idScan);
+    console.log('🟢 SCAN OK - ID:', idScan);
     
     let resultData = data.resultData;
     
@@ -165,9 +155,9 @@ function processScanData(data, idScan, logTimestamp) {
     if (typeof resultData === 'string' && resultData.trim().startsWith('{')) {
       try {
         resultData = JSON.parse(resultData);
-        console.log('📦 Parsed resultData from string');
+        console.log('📦 resultData parsed from string');
       } catch (e) {
-        console.log('⚠️ Could not parse resultData string, using as-is');
+        console.log('⚠️ resultData bukan JSON string');
       }
     }
 
@@ -192,7 +182,7 @@ function processScanData(data, idScan, logTimestamp) {
         }
       };
     } else {
-      // Jika resultData tidak ada atau bukan object
+      // Fallback jika resultData tidak ada
       return {
         type: 'SCAN',
         data: {
@@ -213,6 +203,10 @@ function processScanData(data, idScan, logTimestamp) {
       };
     }
   }
+
+  // CASE 3: Format tidak dikenal
+  console.log('⚠️ Unknown scan format:', data);
+  return null;
 }
 
 module.exports = { parseLogLine };
