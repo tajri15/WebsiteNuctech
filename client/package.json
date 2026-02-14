@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
-    "antd": "^5.27.4",
-    "axios": "^1.12.2",
+    "antd": "^5.29.3",
+    "axios": "^1.13.5",
     "dayjs": "^1.11.19",
     "jspdf": "^2.5.2",
     "jspdf-autotable": "^3.8.4",
