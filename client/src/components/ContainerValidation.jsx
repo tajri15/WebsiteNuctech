@@ -14,11 +14,12 @@ import {
   Row,
   Col,
   Statistic,
-  Progress,
   Select,
   Input,
   Divider,
-  Badge
+  Badge,
+  Alert,
+  Progress
 } from 'antd';
 import {
   CheckCircleOutlined,
@@ -26,15 +27,14 @@ import {
   ReloadOutlined,
   SearchOutlined,
   EyeOutlined,
-  WarningOutlined,
   FilePdfOutlined,
   PictureOutlined,
   SafetyCertificateOutlined,
-  ExclamationCircleOutlined,
   CalendarOutlined,
   ScanOutlined,
   EditOutlined,
-  QuestionCircleOutlined
+  QuestionCircleOutlined,
+  WarningOutlined
 } from '@ant-design/icons';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -49,71 +49,259 @@ const { Option } = Select;
 const API_BASE = 'http://localhost:5000';
 
 // ============================================================
-// Validasi format container
+// Validasi format container (4 huruf + 7 angka)
 // ============================================================
 const validateContainerFormat = (containerNo) => {
-  if (
-    !containerNo ||
-    containerNo.trim() === '' ||
-    containerNo.toUpperCase().includes('SCAN FAILED') ||
-    containerNo.toUpperCase().includes('FAILED')
-  ) {
-    return { isValid: false, reason: 'empty_or_failed' };
+  if (!containerNo || containerNo.trim() === '') {
+    return { isValid: false, reason: 'empty' };
   }
 
-  const singlePattern = /^[A-Z]{4}\d{7}$/;
-  const doublePattern  = /^[A-Z]{4}\d{7}\/[A-Z]{4}\d{7}$/;
+  const pattern = /^[A-Z]{4}\d{7}$/;
   const trimmed = containerNo.trim().toUpperCase();
 
-  if (singlePattern.test(trimmed) || doublePattern.test(trimmed)) {
-    return { isValid: true, reason: 'valid' };
-  }
-  return { isValid: false, reason: 'invalid_format' };
+  return {
+    isValid: pattern.test(trimmed),
+    reason: pattern.test(trimmed) ? 'valid' : 'invalid_format'
+  };
 };
 
 // ============================================================
-// Reason label
+// PREPROCESSING GAMBAR (OPTIMASI UNTUK OCR)
 // ============================================================
-const reasonLabel = (reason) => {
-  switch (reason) {
-    case 'empty_or_failed': return 'Kosong / Scan Failed';
-    case 'invalid_format':  return 'Format Tidak Valid';
-    case 'valid':           return 'Valid';
-    default:                return reason;
-  }
+const preprocessImage = (imageUrl) => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+    img.src = imageUrl;
+    
+    img.onload = () => {
+      try {
+        // Buat canvas
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Resize untuk performa dan akurasi
+        const maxWidth = 1200; // Resolusi lebih tinggi
+        const scale = maxWidth / img.width;
+        canvas.width = maxWidth;
+        canvas.height = img.height * scale;
+        
+        // Gambar dengan smoothing
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        
+        // Ambil data pixel
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        
+        // ====================================================
+        // STEP 1: Grayscale + Kontras Tinggi
+        // ====================================================
+        for (let i = 0; i < data.length; i += 4) {
+          // Konversi ke grayscale
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          
+          // Rumus grayscale yang baik (mempertahankan kontras)
+          const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+          
+          // Tingkatkan kontras
+          let contrast = 1.5; // Faktor kontras
+          let adjusted = 128 + contrast * (gray - 128);
+          
+          // Clamping
+          adjusted = Math.max(0, Math.min(255, adjusted));
+          
+          // Threshold adaptif (hitam putih tegas)
+          const threshold = 120;
+          const value = adjusted > threshold ? 255 : 0;
+          
+          data[i] = value;     // R
+          data[i + 1] = value; // G
+          data[i + 2] = value; // B
+          // Alpha tetap
+        }
+        
+        // ====================================================
+        // STEP 2: Sharpen (Tajamkan tepi)
+        // ====================================================
+        // Sederhana: kita sudah pakai kontras tinggi
+        
+        ctx.putImageData(imageData, 0, 0);
+        
+        // Konversi ke blob untuk performa lebih baik
+        canvas.toBlob((blob) => {
+          const url = URL.createObjectURL(blob);
+          resolve(url);
+        }, 'image/png', 1.0);
+        
+      } catch (err) {
+        console.error('❌ Preprocessing error:', err);
+        reject(err);
+      }
+    };
+    
+    img.onerror = (err) => {
+      console.error('❌ Image load error:', err);
+      reject(err);
+    };
+  });
 };
 
 // ============================================================
-// Levenshtein Distance untuk hitung kemiripan string
+// EKSTRAK NOMOR CONTAINER DARI TEKS OCR
 // ============================================================
-const levenshteinDistance = (a, b) => {
-  const matrix = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+const extractContainerNumber = (text) => {
+  if (!text) return null;
   
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b.charAt(i-1) === a.charAt(j-1)) {
-        matrix[i][j] = matrix[i-1][j-1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i-1][j-1] + 1,
-          matrix[i][j-1] + 1,
-          matrix[i-1][j] + 1
-        );
+  console.log('🔍 Mengekstrak dari teks:', text);
+  
+  // Bersihkan teks
+  const cleanText = text.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
+  
+  // ====================================================
+  // POLA 1: Format BAKU (4 huruf + 7 angka)
+  // ====================================================
+  const pattern1 = /\b([A-Z]{4})\s*(\d{7})\b/;
+  const match1 = cleanText.match(pattern1);
+  if (match1) {
+    const result = match1[1] + match1[2];
+    console.log('✅ Pola 1 cocok:', result);
+    return result;
+  }
+  
+  // ====================================================
+  // POLA 2: 4 huruf + spasi + 7 angka
+  // ====================================================
+  const pattern2 = /([A-Z]{4})\s+(\d{7})/;
+  const match2 = cleanText.match(pattern2);
+  if (match2) {
+    const result = match2[1] + match2[2];
+    console.log('✅ Pola 2 cocok:', result);
+    return result;
+  }
+  
+  // ====================================================
+  // POLA 3: 4 huruf + 7 angka (tanpa batas kata)
+  // ====================================================
+  const pattern3 = /[A-Z]{4}\d{7}/;
+  const match3 = cleanText.match(pattern3);
+  if (match3) {
+    console.log('✅ Pola 3 cocok:', match3[0]);
+    return match3[0];
+  }
+  
+  // ====================================================
+  // POLA 4: Toleransi OCR (huruf mirip angka)
+  // ====================================================
+  // Ganti huruf yang sering salah terbaca
+  let corrected = cleanText
+    .replace(/O/g, '0')
+    .replace(/I/g, '1')
+    .replace(/Z/g, '2')
+    .replace(/S/g, '5')
+    .replace(/B/g, '8')
+    .replace(/G/g, '6');
+  
+  const pattern4 = /[A-Z0-9]{4}\d{7}/;
+  const match4 = corrected.match(pattern4);
+  if (match4) {
+    console.log('✅ Pola 4 (koreksi) cocok:', match4[0]);
+    return match4[0];
+  }
+  
+  // ====================================================
+  // POLA 5: Cari kata yang panjangnya 11 karakter (4+7)
+  // ====================================================
+  const words = cleanText.split(/\s+/);
+  for (const word of words) {
+    const cleanWord = word.replace(/[^A-Z0-9]/g, '');
+    if (cleanWord.length === 11) {
+      // Cek apakah formatnya 4 huruf + 7 angka
+      const letters = cleanWord.substring(0, 4);
+      const numbers = cleanWord.substring(4);
+      if (/^[A-Z]{4}$/.test(letters) && /^\d{7}$/.test(numbers)) {
+        console.log('✅ Pola 5 (kata panjang) cocok:', cleanWord);
+        return cleanWord;
       }
     }
   }
-  return matrix[b.length][a.length];
+  
+  console.log('❌ Tidak menemukan pola container number');
+  return null;
 };
 
-const calculateSimilarity = (str1, str2) => {
-  if (!str1 || !str2) return 0;
-  const longer = str1.length > str2.length ? str1 : str2;
-  const shorter = str1.length > str2.length ? str2 : str1;
-  if (longer.length === 0) return 100;
-  const distance = levenshteinDistance(longer, shorter);
-  return Math.round(((longer.length - distance) / longer.length) * 100 * 10) / 10;
+// ============================================================
+// OCR DENGAN TESSERACT (OFFLINE)
+// ============================================================
+const extractContainerFromImage = async (imageUrl, retryCount = 0) => {
+  try {
+    console.log(`🔍 OCR Attempt ${retryCount + 1}:`, imageUrl);
+    
+    // Preprocessing gambar dulu
+    const processedImageUrl = await preprocessImage(imageUrl);
+    
+    // Konfigurasi Tesseract untuk container number
+    const result = await Tesseract.recognize(
+      processedImageUrl,
+      'eng',
+      {
+        // Whitelist karakter (hanya huruf kapital dan angka)
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+        
+        // Mode segmentasi:
+        // 6 = Treat as a single uniform block of text
+        // 7 = Treat the image as a single text line
+        tessedit_pageseg_mode: '7',
+        
+        // Mode engine: 3 = Default + LSTM (paling akurat)
+        tessedit_ocr_engine_mode: '3',
+        
+        // Optimasi tambahan
+        textord_heavy_nr: '1',           // Noise reduction
+        textord_min_linesize: '2.5',      // Minimum text size
+        textord_words_default_min_height: '10', // Min character height
+        
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            console.log(`📖 OCR Progress: ${Math.round(m.progress * 100)}%`);
+          }
+        }
+      }
+    );
+    
+    const text = result.data.text;
+    console.log('📝 Raw OCR Result:', text);
+    
+    // Ekstrak nomor container
+    const containerNo = extractContainerNumber(text);
+    
+    if (containerNo) {
+      console.log('✅ Berhasil baca:', containerNo);
+      return containerNo;
+    }
+    
+    // Coba lagi dengan konfigurasi berbeda jika gagal
+    if (retryCount < 2) {
+      console.log('⚠️ Gagal, coba lagi dengan konfigurasi berbeda...');
+      return extractContainerFromImage(imageUrl, retryCount + 1);
+    }
+    
+    return null;
+    
+  } catch (error) {
+    console.error('❌ OCR Error:', error);
+    
+    // Retry jika error
+    if (retryCount < 2) {
+      console.log('⚠️ Error, coba lagi...');
+      return extractContainerFromImage(imageUrl, retryCount + 1);
+    }
+    
+    return null;
+  }
 };
 
 // ============================================================
@@ -121,6 +309,8 @@ const calculateSimilarity = (str1, str2) => {
 // ============================================================
 const ContainerValidation = () => {
   const [loading, setLoading] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [ocrLoading, setOcrLoading] = useState(false);
   const [rawData, setRawData] = useState([]);
   const [filteredData, setFilteredData] = useState([]);
   const [dateRange, setDateRange] = useState(null);
@@ -128,149 +318,20 @@ const ContainerValidation = () => {
   const [searchText, setSearchText] = useState('');
   const [imageModalVisible, setImageModalVisible] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
-  const [messageApi, contextHolder] = message.useMessage();
-  
-  // State untuk validasi manual
   const [validationModalVisible, setValidationModalVisible] = useState(false);
   const [validationRecord, setValidationRecord] = useState(null);
   const [manualContainerNo, setManualContainerNo] = useState('');
-  const [validationResult, setValidationResult] = useState(null);
-  const [validatingImage, setValidatingImage] = useState(false);
+  const [ocrResult, setOcrResult] = useState(null);
+  const [messageApi, contextHolder] = message.useMessage();
 
   const [stats, setStats] = useState({
-    total: 0, valid: 0, invalid: 0,
-    emptyFailed: 0, invalidFormat: 0, validPct: 0,
-    matchCount: 0, mismatchCount: 0, manualFixCount: 0
+    total: 0,
+    formatValid: 0,
+    formatInvalid: 0,
+    validImage: 0,
+    invalidImage: 0,
+    unchecked: 0
   });
-
-  // ============================================================
-  // FUNGSI OCR - BACA TEKS DARI GAMBAR
-  // ============================================================
-  const extractContainerFromImage = async (imageUrl) => {
-    try {
-      console.log('🔍 Running OCR on:', imageUrl);
-      
-      const result = await Tesseract.recognize(
-        imageUrl,
-        'eng',
-        {
-          logger: m => {
-            if (m.status === 'recognizing text') {
-              console.log(`📖 OCR Progress: ${Math.round(m.progress * 100)}%`);
-            }
-          }
-        }
-      );
-      
-      const text = result.data.text;
-      console.log('📝 OCR Result Text:', text);
-      
-      // Pattern untuk container number: 4 huruf + 7 angka
-      const containerPattern = /\b([A-Z]{4})\s*(\d{7})\b/;
-      const match = text.match(containerPattern);
-      
-      if (match) {
-        const containerNumber = match[1] + match[2];
-        console.log('✅ Container number detected:', containerNumber);
-        return containerNumber;
-      }
-      
-      // Coba pattern alternatif: 4 huruf + spasi + 7 angka
-      const altPattern = /\b([A-Z]{4})\s+(\d{7})\b/;
-      const altMatch = text.match(altPattern);
-      
-      if (altMatch) {
-        const containerNumber = altMatch[1] + altMatch[2];
-        console.log('✅ Container number detected (alt):', containerNumber);
-        return containerNumber;
-      }
-      
-      console.log('❌ No container number found in image');
-      return null;
-      
-    } catch (error) {
-      console.error('❌ OCR Error:', error);
-      return null;
-    }
-  };
-
-  // ============================================================
-  // FUNGSI VALIDASI OTOMATIS - BANDINGKAN OCR DB VS GAMBAR
-  // ============================================================
-  const validateContainerWithImage = async (record) => {
-    if (!record.images || record.images.length === 0) {
-      return { 
-        match: false, 
-        reason: 'Tidak ada gambar',
-        similarity: 0,
-        containerFromImage: null,
-        ocrResult: record.container_no
-      };
-    }
-
-    // Ambil gambar pertama (biasanya yang paling jelas)
-    const firstImage = record.images[0];
-    const imageUrl = `${API_BASE}/images/${firstImage}`;
-    
-    setValidatingImage(true);
-    
-    try {
-      // Baca teks dari gambar
-      const containerFromImage = await extractContainerFromImage(imageUrl);
-      
-      if (!containerFromImage) {
-        return { 
-          match: false, 
-          reason: 'Tidak dapat membaca nomor container dari gambar',
-          similarity: 0,
-          containerFromImage: null,
-          ocrResult: record.container_no
-        };
-      }
-
-      // Bandingkan dengan OCR result dari database
-      const ocrResult = record.container_no || '';
-      const isMatch = ocrResult.toUpperCase() === containerFromImage.toUpperCase();
-      const similarity = calculateSimilarity(ocrResult, containerFromImage);
-
-      const result = {
-        match: isMatch,
-        similarity,
-        ocrResult,
-        containerFromImage,
-        reason: isMatch ? 'Sesuai' : `Tidak cocok (${similarity}% mirip)`,
-        imageText: containerFromImage
-      };
-
-      // Kirim hasil ke backend
-      try {
-        await axios.post(`${API_BASE}/api/update-validation-result`, {
-          scanId: record.id,
-          ocrResult: record.container_no,
-          imageText: containerFromImage,
-          isMatch,
-          similarity
-        });
-        console.log('✅ Validation result saved to database');
-      } catch (err) {
-        console.error('❌ Failed to save validation result:', err);
-      }
-
-      return result;
-      
-    } catch (error) {
-      console.error('❌ Validation error:', error);
-      return { 
-        match: false, 
-        reason: 'Error saat validasi',
-        similarity: 0,
-        containerFromImage: null,
-        ocrResult: record.container_no
-      };
-    } finally {
-      setValidatingImage(false);
-    }
-  };
 
   // ============================================================
   // Fetch data dari API
@@ -280,286 +341,218 @@ const ContainerValidation = () => {
     try {
       const params = {};
       if (dateRange?.[0]) params.startDate = dateRange[0].format('YYYY-MM-DD HH:mm:ss');
-      if (dateRange?.[1]) params.endDate   = dateRange[1].format('YYYY-MM-DD HH:mm:ss');
+      if (dateRange?.[1]) params.endDate = dateRange[1].format('YYYY-MM-DD HH:mm:ss');
 
       const res = await axios.get(`${API_BASE}/api/container-validation`, { params });
 
-      const enriched = res.data.data.map((item) => {
-        const validation = validateContainerFormat(item.container_no);
+      // Enrich data dengan validasi format
+      const enriched = res.data.data.map(item => {
+        const formatValidation = validateContainerFormat(item.container_no);
         const images = [
           item.image1_path, item.image2_path, item.image3_path,
           item.image4_path, item.image5_path, item.image6_path,
-          item.image7_path, item.image8_path,
+          item.image7_path, item.image8_path
         ].filter(Boolean);
 
         return {
           ...item,
-          isValid:          validation.isValid,
-          validationReason: validation.reason,
-          confidence:       validation.isValid ? 95 : 0,
-          images,
+          formatValid: formatValidation.isValid,
+          formatReason: formatValidation.reason,
+          images
         };
       });
 
       setRawData(enriched);
-      computeStats(enriched);
-      messageApi.success(`${enriched.length} data berhasil dimuat`);
+      
+      // Hitung statistik
+      const total = enriched.length;
+      const formatValid = enriched.filter(d => d.formatValid).length;
+      const validImage = enriched.filter(d => d.validation_status === 'VALID').length;
+      const invalidImage = enriched.filter(d => d.validation_status === 'INVALID').length;
+      const unchecked = enriched.filter(d => !d.validation_status).length;
+      
+      setStats({
+        total,
+        formatValid,
+        formatInvalid: total - formatValid,
+        validImage,
+        invalidImage,
+        unchecked
+      });
+      
+      messageApi.success(`${enriched.length} data dimuat`);
     } catch (err) {
       console.error(err);
-      messageApi.error('Gagal memuat data. Pastikan backend berjalan.');
+      messageApi.error('Gagal memuat data');
     } finally {
       setLoading(false);
     }
   }, [dateRange, messageApi]);
 
   // ============================================================
-  // Hitung statistik
-  // ============================================================
-  const computeStats = (data) => {
-    const total        = data.length;
-    const valid        = data.filter(d => d.isValid).length;
-    const invalid      = total - valid;
-    const emptyFailed  = data.filter(d => d.validationReason === 'empty_or_failed').length;
-    const invalidFmt   = data.filter(d => d.validationReason === 'invalid_format').length;
-    const validPct     = total > 0 ? parseFloat(((valid / total) * 100).toFixed(1)) : 0;
-    
-    // Statistik validasi gambar
-    const matchCount = data.filter(d => d.imageValidationStatus === 'MATCH').length;
-    const mismatchCount = data.filter(d => d.imageValidationStatus === 'MISMATCH').length;
-    const manualFixCount = data.filter(d => d.manual_validated === true).length;
-    
-    setStats({ 
-      total, valid, invalid, 
-      emptyFailed, invalidFormat: invalidFmt, validPct,
-      matchCount, mismatchCount, manualFixCount
-    });
-  };
-
-  // ============================================================
   // Filter data
   // ============================================================
   useEffect(() => {
     let d = [...rawData];
-    if (selectedStatus === 'valid')   d = d.filter(x => x.isValid);
-    if (selectedStatus === 'invalid') d = d.filter(x => !x.isValid);
-    if (selectedStatus === 'match') d = d.filter(x => x.imageValidationStatus === 'MATCH');
-    if (selectedStatus === 'mismatch') d = d.filter(x => x.imageValidationStatus === 'MISMATCH');
-    if (selectedStatus === 'manual') d = d.filter(x => x.manual_validated === true);
-    if (selectedStatus === 'unchecked') d = d.filter(x => !x.imageValidationStatus && !x.manual_validated);
+    
+    if (selectedStatus === 'format_valid') d = d.filter(x => x.formatValid);
+    if (selectedStatus === 'format_invalid') d = d.filter(x => !x.formatValid);
+    if (selectedStatus === 'image_valid') d = d.filter(x => x.validation_status === 'VALID');
+    if (selectedStatus === 'image_invalid') d = d.filter(x => x.validation_status === 'INVALID');
+    if (selectedStatus === 'unchecked') d = d.filter(x => !x.validation_status);
     
     if (searchText.trim()) {
       const s = searchText.trim().toLowerCase();
       d = d.filter(x =>
         (x.container_no || '').toLowerCase().includes(s) ||
         (x.id_scan || '').toLowerCase().includes(s) ||
-        (x.imageTextDetected || '').toLowerCase().includes(s)
+        (x.correct_container_no || '').toLowerCase().includes(s)
       );
     }
+    
     setFilteredData(d);
   }, [rawData, selectedStatus, searchText]);
 
-  // Load data saat mount atau dateRange berubah
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // ============================================================
-  // FUNGSI DOWNLOAD PDF DENGAN RANGE WAKTU
+  // VALIDASI SATU RECORD DENGAN OCR
   // ============================================================
-  const downloadPDF = () => {
-    // Ambil data yang sudah difilter (sesuai range waktu dan filter lainnya)
-    const dataToExport = filteredData;
-    
-    if (!dataToExport.length) { 
-      messageApi.warning('Tidak ada data untuk didownload'); 
-      return; 
+  const validateSingleRecord = async (record) => {
+    if (!record.images || record.images.length === 0) {
+      messageApi.warning('Tidak ada gambar untuk divalidasi');
+      return;
     }
-
-    // Hitung statistik untuk laporan
-    const totalData = dataToExport.length;
-    const validFormat = dataToExport.filter(d => d.isValid).length;
-    const invalidFormat = totalData - validFormat;
-    const matchGambar = dataToExport.filter(d => d.imageValidationStatus === 'MATCH').length;
-    const mismatchGambar = dataToExport.filter(d => d.imageValidationStatus === 'MISMATCH').length;
-    const manualFix = dataToExport.filter(d => d.manual_validated).length;
-
-    const doc = new jsPDF({ 
-      orientation: 'landscape',
-      unit: 'mm',
-      format: 'a4'
-    });
-
-    // ===== HEADER =====
-    doc.setFontSize(18);
-    doc.setTextColor(0, 21, 41);
-    doc.text('LAPORAN VALIDASI CONTAINER', 14, 15);
     
-    doc.setFontSize(10);
-    doc.setTextColor(100);
+    setOcrLoading(true);
     
-    // Info periode
-    let periodeText = 'Periode: SEMUA DATA';
-    if (dateRange?.[0] && dateRange?.[1]) {
-      periodeText = `Periode: ${dateRange[0].format('DD/MM/YYYY HH:mm')} - ${dateRange[1].format('DD/MM/YYYY HH:mm')}`;
-    }
-    doc.text(periodeText, 14, 22);
-    
-    // Info filter
-    let filterText = 'Filter: ';
-    switch(selectedStatus) {
-      case 'all': filterText += 'Semua Data'; break;
-      case 'valid': filterText += 'Format Valid'; break;
-      case 'invalid': filterText += 'Format Invalid'; break;
-      case 'match': filterText += 'Cocok Gambar'; break;
-      case 'mismatch': filterText += 'Tidak Cocok Gambar'; break;
-      case 'manual': filterText += 'Manual Fix'; break;
-      case 'unchecked': filterText += 'Belum Validasi'; break;
-      default: filterText += 'Semua Data';
-    }
-    doc.text(filterText, 14, 28);
-    
-    // Tanggal cetak
-    doc.text(`Dicetak: ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`, 14, 34);
-    
-    // ===== STATISTIK RINGKAS =====
-    doc.setFontSize(12);
-    doc.setTextColor(0, 102, 204);
-    doc.text('RINGKASAN STATISTIK', 14, 44);
-    
-    doc.setFontSize(9);
-    doc.setTextColor(50);
-    
-    const statsY = 50;
-    doc.text(`Total Data: ${totalData}`, 14, statsY);
-    doc.text(`Format Valid: ${validFormat} (${totalData > 0 ? ((validFormat/totalData)*100).toFixed(1) : 0}%)`, 14, statsY + 5);
-    doc.text(`Format Invalid: ${invalidFormat} (${totalData > 0 ? ((invalidFormat/totalData)*100).toFixed(1) : 0}%)`, 14, statsY + 10);
-    doc.text(`Cocok Gambar: ${matchGambar}`, 80, statsY);
-    doc.text(`Tidak Cocok: ${mismatchGambar}`, 80, statsY + 5);
-    doc.text(`Manual Fix: ${manualFix}`, 80, statsY + 10);
-
-    // ===== TABEL DATA =====
-    autoTable(doc, {
-      startY: 70,
-      head: [['No', 'ID Scan', 'Container No (OCR)', 'Container No (Gambar)', 'Status Format', 'Validasi Gambar', 'Waktu Scan', 'Jml Gambar']],
-      body: dataToExport.map((item, i) => [
-        i + 1,
-        item.id_scan || '-',
-        item.container_no || '(kosong)',
-        item.imageTextDetected || '-',
-        item.isValid ? 'VALID' : 'INVALID',
-        item.manual_validated ? 'MANUAL FIX' : 
-        (item.imageValidationStatus === 'MATCH' ? 'COCOK' : 
-         (item.imageValidationStatus === 'MISMATCH' ? 'TIDAK COCOK' : 'BELUM CEK')),
-        dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss'),
-        item.images.length.toString()
-      ]),
-      styles: { 
-        fontSize: 7, 
-        cellPadding: 2,
-        overflow: 'linebreak',
-        cellWidth: 'wrap'
-      },
-      headStyles: { 
-        fillColor: [0, 21, 41], 
-        textColor: 255, 
-        fontStyle: 'bold',
-        halign: 'center'
-      },
-      alternateRowStyles: { fillColor: [245, 245, 245] },
-      columnStyles: {
-        0: { cellWidth: 10, halign: 'center' },
-        1: { cellWidth: 35 },
-        2: { cellWidth: 35 },
-        3: { cellWidth: 35 },
-        4: { cellWidth: 20, halign: 'center' },
-        5: { cellWidth: 25, halign: 'center' },
-        6: { cellWidth: 35, halign: 'center' },
-        7: { cellWidth: 15, halign: 'center' }
-      },
-      didDrawPage: (data) => {
-        // Footer setiap halaman
-        doc.setFontSize(8);
-        doc.setTextColor(150);
-        doc.text(
-          `Halaman ${data.pageNumber} - Sistem Validasi Container Auto-Detect`,
-          data.settings.margin.left,
-          doc.internal.pageSize.height - 10
-        );
-      }
-    });
-
-    // ===== DATA TIDAK COCOK (HIGHLIGHT) =====
-    const mismatchData = dataToExport.filter(d => 
-      d.imageValidationStatus === 'MISMATCH' && !d.manual_validated
-    );
-    
-    if (mismatchData.length > 0) {
-      doc.addPage();
+    try {
+      // Ambil gambar pertama (biasanya yang paling jelas)
+      const imageUrl = `${API_BASE}/images/${record.images[0]}`;
       
-      doc.setFontSize(14);
-      doc.setTextColor(255, 0, 0);
-      doc.text('DATA YANG TIDAK COCOK (PERLU DIPERBAIKI)', 14, 20);
+      // Tampilkan progress
+      const hideLoading = messageApi.loading('Memproses gambar...', 0);
       
-      autoTable(doc, {
-        startY: 30,
-        head: [['No', 'ID Scan', 'OCR Result', 'Dari Gambar', 'Kemiripan', 'Waktu Scan']],
-        body: mismatchData.map((item, i) => [
-          i + 1,
-          item.id_scan || '-',
-          item.container_no || '(kosong)',
-          item.imageTextDetected || '-',
-          `${item.validation_confidence || 0}%`,
-          dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss')
-        ]),
-        styles: { fontSize: 8 },
-        headStyles: { fillColor: [255, 0, 0], textColor: 255 },
-        columnStyles: {
-          0: { cellWidth: 10 },
-          4: { cellWidth: 20, halign: 'center' }
+      // Baca nomor container dari gambar
+      const containerFromImage = await extractContainerFromImage(imageUrl);
+      
+      hideLoading();
+      
+      if (containerFromImage) {
+        const ocrResult = record.container_no || '';
+        const isMatch = containerFromImage === ocrResult;
+        
+        // Simpan hasil ke database
+        await axios.post(`${API_BASE}/api/update-validation-result`, {
+          scanId: record.id,
+          imageText: containerFromImage,
+          isMatch,
+          similarity: isMatch ? 100 : 0
+        });
+        
+        if (isMatch) {
+          messageApi.success({
+            content: `✅ VALID: Nomor container sesuai dengan gambar (${containerFromImage})`,
+            duration: 5
+          });
+        } else {
+          messageApi.error({
+            content: `❌ INVALID: Gambar="${containerFromImage}", OCR="${ocrResult}"`,
+            duration: 8
+          });
         }
-      });
+        
+        // Refresh data
+        fetchData();
+      } else {
+        messageApi.warning('Tidak dapat membaca nomor container dari gambar');
+      }
+    } catch (err) {
+      messageApi.error('Gagal memproses gambar');
+      console.error(err);
+    } finally {
+      setOcrLoading(false);
     }
-
-    // ===== FOOTER =====
-    const totalPages = doc.internal.getNumberOfPages();
-    for (let i = 1; i <= totalPages; i++) {
-      doc.setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(150);
-      doc.text(
-        `Nuctech Transmission System - Laporan digenerate ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`,
-        14,
-        doc.internal.pageSize.height - 5
-      );
-    }
-
-    // Generate filename dengan range waktu
-    let filename = 'Laporan_Validasi_Container';
-    if (dateRange?.[0] && dateRange?.[1]) {
-      filename += `_${dateRange[0].format('YYYYMMDD_HHmm')}_${dateRange[1].format('YYYYMMDD_HHmm')}`;
-    } else {
-      filename += `_${dayjs().format('YYYYMMDD_HHmmss')}`;
-    }
-    filename += '.pdf';
-
-    doc.save(filename);
-    messageApi.success(`PDF berhasil didownload: ${mismatchData.length} data tidak cocok`);
   };
 
   // ============================================================
-  // Open Validation Modal
+  // VALIDASI SEMUA RECORD
   // ============================================================
-  const openValidationModal = async (record) => {
+  const validateAllRecords = async () => {
+    const unchecked = filteredData.filter(d => !d.validation_status && d.images?.length > 0);
+    
+    if (unchecked.length === 0) {
+      messageApi.info('Tidak ada data yang perlu divalidasi');
+      return;
+    }
+    
+    setValidating(true);
+    
+    let success = 0;
+    let failed = 0;
+    
+    const hideLoading = messageApi.loading(`Memvalidasi ${unchecked.length} data...`, 0);
+    
+    for (let i = 0; i < unchecked.length; i++) {
+      const record = unchecked[i];
+      try {
+        const imageUrl = `${API_BASE}/images/${record.images[0]}`;
+        const containerFromImage = await extractContainerFromImage(imageUrl);
+        
+        if (containerFromImage) {
+          const isMatch = containerFromImage === (record.container_no || '');
+          
+          await axios.post(`${API_BASE}/api/update-validation-result`, {
+            scanId: record.id,
+            imageText: containerFromImage,
+            isMatch,
+            similarity: isMatch ? 100 : 0
+          });
+          
+          success++;
+        } else {
+          failed++;
+        }
+        
+        // Update progress setiap 5 data
+        if ((i + 1) % 5 === 0) {
+          messageApi.loading(`Progress: ${i + 1}/${unchecked.length}`, 0);
+        }
+        
+      } catch (err) {
+        failed++;
+      }
+    }
+    
+    hideLoading();
+    messageApi.success(`Selesai! ${success} berhasil, ${failed} gagal`);
+    
+    setValidating(false);
+    fetchData();
+  };
+
+  // ============================================================
+  // OPEN MANUAL VALIDATION MODAL
+  // ============================================================
+  const openManualValidation = async (record) => {
     setValidationRecord(record);
     setManualContainerNo(record.container_no || '');
     setValidationModalVisible(true);
-    setValidationResult(null);
+    setOcrResult(null);
     
-    // Auto-validate when opening modal
-    const result = await validateContainerWithImage(record);
-    setValidationResult(result);
+    // Coba baca dari gambar otomatis
+    if (record.images && record.images.length > 0) {
+      const imageUrl = `${API_BASE}/images/${record.images[0]}`;
+      const result = await extractContainerFromImage(imageUrl);
+      if (result) {
+        setOcrResult(result);
+        setManualContainerNo(result); // Isi otomatis dengan hasil OCR
+      }
+    }
   };
 
   // ============================================================
-  // Handle Manual Validation
+  // HANDLE MANUAL VALIDATION
   // ============================================================
   const handleManualValidation = async () => {
     if (!manualContainerNo.trim()) {
@@ -568,212 +561,198 @@ const ContainerValidation = () => {
     }
 
     try {
-      const response = await axios.post(`${API_BASE}/api/manual-container-validation`, {
+      await axios.post(`${API_BASE}/api/manual-container-validation`, {
         scanId: validationRecord.id,
-        correctContainerNo: manualContainerNo
+        correctContainerNo: manualContainerNo.toUpperCase()
       });
 
-      if (response.data.success) {
-        messageApi.success('Nomor container berhasil diperbaiki');
-        setValidationModalVisible(false);
-        fetchData(); // Refresh data
-      }
+      messageApi.success('Nomor container berhasil diperbaiki');
+      setValidationModalVisible(false);
+      fetchData();
     } catch (err) {
-      messageApi.error('Gagal memperbaiki nomor container');
+      messageApi.error('Gagal menyimpan');
       console.error(err);
     }
   };
 
   // ============================================================
-  // Validate Single Record
+  // DOWNLOAD PDF
   // ============================================================
-  const handleValidateRecord = async (record) => {
-    const result = await validateContainerWithImage(record);
-    if (result.match) {
-      messageApi.success(`✅ Container cocok: ${result.containerFromImage}`);
-    } else {
-      messageApi.warning(`❌ Tidak cocok: OCR="${result.ocrResult}", Gambar="${result.containerFromImage}" (${result.similarity}% mirip)`);
+  const downloadPDF = () => {
+    if (!filteredData.length) {
+      messageApi.warning('Tidak ada data untuk diexport');
+      return;
     }
-    fetchData(); // Refresh to show new validation status
+
+    const doc = new jsPDF({ orientation: 'landscape' });
+
+    // HEADER
+    doc.setFontSize(18);
+    doc.setTextColor(0, 21, 41);
+    doc.text('LAPORAN VALIDASI CONTAINER', 14, 15);
+
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    
+    let periodeText = 'Periode: SEMUA DATA';
+    if (dateRange?.[0] && dateRange?.[1]) {
+      periodeText = `Periode: ${dateRange[0].format('DD/MM/YYYY HH:mm')} - ${dateRange[1].format('DD/MM/YYYY HH:mm')}`;
+    }
+    doc.text(periodeText, 14, 22);
+    doc.text(`Dicetak: ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`, 14, 28);
+    
+    // STATISTIK RINGKAS
+    doc.setFontSize(11);
+    doc.setTextColor(0, 102, 204);
+    doc.text('RINGKASAN', 14, 38);
+    
+    doc.setFontSize(9);
+    doc.setTextColor(50);
+    doc.text(`Total Data: ${filteredData.length}`, 14, 45);
+    doc.text(`Format Valid: ${filteredData.filter(d => d.formatValid).length}`, 14, 52);
+    doc.text(`Format Invalid: ${filteredData.filter(d => !d.formatValid).length}`, 14, 59);
+    doc.text(`Valid Gambar: ${filteredData.filter(d => d.validation_status === 'VALID').length}`, 80, 45);
+    doc.text(`Invalid Gambar: ${filteredData.filter(d => d.validation_status === 'INVALID').length}`, 80, 52);
+    doc.text(`Belum Dicek: ${filteredData.filter(d => !d.validation_status).length}`, 80, 59);
+
+    // TABEL
+    autoTable(doc, {
+      startY: 70,
+      head: [['No', 'ID Scan', 'Hasil OCR', 'Dari Gambar', 'Status Valid', 'Waktu Scan']],
+      body: filteredData.map((item, i) => [
+        i + 1,
+        item.id_scan || '-',
+        item.container_no || '-',
+        item.correct_container_no || '-',
+        item.validation_status || 'BELUM',
+        dayjs(item.scan_time).format('DD/MM/YYYY HH:mm')
+      ]),
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [0, 21, 41], textColor: 255 },
+      columnStyles: {
+        4: { 
+          cellWidth: 25,
+          halign: 'center',
+          cellCallback: (cell, data) => {
+            if (cell.raw === 'VALID') cell.styles.fillColor = [230, 255, 230];
+            if (cell.raw === 'INVALID') cell.styles.fillColor = [255, 230, 230];
+          }
+        }
+      }
+    });
+
+    // HALAMAN KHUSUS UNTUK YANG INVALID
+    const invalidData = filteredData.filter(d => d.validation_status === 'INVALID');
+    if (invalidData.length > 0) {
+      doc.addPage();
+      doc.setFontSize(14);
+      doc.setTextColor(255, 0, 0);
+      doc.text('DATA TIDAK VALID (PERLU DIPERBAIKI)', 14, 20);
+      
+      autoTable(doc, {
+        startY: 30,
+        head: [['No', 'ID Scan', 'OCR Result', 'Seharusnya', 'Waktu Scan']],
+        body: invalidData.map((item, i) => [
+          i + 1,
+          item.id_scan || '-',
+          item.container_no || '-',
+          item.correct_container_no || '-',
+          dayjs(item.scan_time).format('DD/MM/YYYY HH:mm')
+        ]),
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [255, 0, 0], textColor: 255 }
+      });
+    }
+
+    doc.save(`Validasi_Container_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
+    messageApi.success('PDF berhasil didownload');
   };
 
   // ============================================================
-  // Table columns
+  // TABLE COLUMNS
   // ============================================================
   const columns = [
     {
       title: 'No',
       key: 'no',
-      width: 55,
-      align: 'center',
-      render: (_, __, i) => i + 1,
+      width: 50,
+      render: (_, __, i) => i + 1
     },
     {
-      title: 'Status Format',
-      key: 'status',
-      width: 110,
-      align: 'center',
-      filters: [
-        { text: '✅ Valid',   value: true  },
-        { text: '❌ Invalid', value: false },
-      ],
-      onFilter: (val, record) => record.isValid === val,
+      title: 'Format',
+      key: 'formatStatus',
+      width: 80,
       render: (_, record) => (
-        <Tooltip title={reasonLabel(record.validationReason)}>
-          {record.isValid
-            ? <Tag icon={<CheckCircleOutlined />} color="success">VALID</Tag>
-            : <Tag icon={<CloseCircleOutlined />} color="error">INVALID</Tag>
-          }
-        </Tooltip>
-      ),
+        record.formatValid 
+          ? <Tag color="success">✓ FORMAT</Tag>
+          : <Tag color="error">✗ FORMAT</Tag>
+      )
     },
     {
       title: 'Validasi Gambar',
-      key: 'imageValidation',
-      width: 140,
-      align: 'center',
-      filters: [
-        { text: '✅ Cocok', value: 'MATCH' },
-        { text: '❌ Tidak Cocok', value: 'MISMATCH' },
-        { text: '✏️ Manual Fix', value: 'MANUAL_FIX' },
-        { text: '⏳ Belum Cek', value: 'UNCHECKED' },
-      ],
-      onFilter: (val, record) => {
-        if (val === 'MANUAL_FIX') return record.manual_validated === true;
-        if (val === 'UNCHECKED') return !record.imageValidationStatus && !record.manual_validated;
-        return record.imageValidationStatus === val;
-      },
+      key: 'imageStatus',
+      width: 120,
       render: (_, record) => {
-        // Priority: Manual Fix > MATCH/MISMATCH > UNCHECKED
-        if (record.manual_validated) {
+        if (record.validation_status === 'VALID') {
+          return <Tag icon={<CheckCircleOutlined />} color="success">✓ VALID</Tag>;
+        }
+        if (record.validation_status === 'INVALID') {
           return (
-            <Tooltip title={`Diperbaiki manual: ${record.original_ocr_result || ''} → ${record.container_no}`}>
-              <Tag icon={<EditOutlined />} color="warning">
-                MANUAL FIX
-              </Tag>
+            <Tooltip title={`OCR: ${record.container_no}, Benar: ${record.correct_container_no}`}>
+              <Tag icon={<CloseCircleOutlined />} color="error">✗ INVALID</Tag>
             </Tooltip>
           );
         }
-        
-        if (record.imageValidationStatus === 'MATCH') {
-          return (
-            <Tooltip title={`Cocok dengan gambar (${record.validation_confidence || 100}%)`}>
-              <Tag icon={<CheckCircleOutlined />} color="success">
-                COCOK
-              </Tag>
-            </Tooltip>
-          );
-        }
-        
-        if (record.imageValidationStatus === 'MISMATCH') {
-          return (
-            <Tooltip title={`Tidak cocok: OCR="${record.container_no}", Gambar="${record.imageTextDetected || '?'}" (${record.validation_confidence || 0}% mirip)`}>
-              <Tag icon={<CloseCircleOutlined />} color="error">
-                TIDAK COCOK
-              </Tag>
-            </Tooltip>
-          );
-        }
-        
-        return (
-          <Tooltip title="Belum divalidasi dengan gambar">
-            <Tag icon={<QuestionCircleOutlined />} color="default">
-              BELUM CEK
-            </Tag>
-          </Tooltip>
-        );
+        return <Tag color="default">⏳ BELUM</Tag>;
       }
     },
     {
       title: 'ID Scan',
       dataIndex: 'id_scan',
-      key: 'id_scan',
-      width: 200,
-      ellipsis: true,
+      width: 180,
+      ellipsis: true
     },
     {
-      title: 'Container No',
+      title: 'Hasil OCR',
       dataIndex: 'container_no',
-      key: 'container_no',
-      width: 210,
+      width: 150,
       render: (text, record) => (
-        <div>
-          <Text
-            strong
-            style={{ 
-              color: record.manual_validated ? '#fa8c16' : (record.isValid ? '#52c41a' : '#ff4d4f'),
-              fontSize: 13,
-              textDecoration: record.manual_validated ? 'line-through' : 'none'
-            }}
-          >
-            {record.manual_validated ? record.original_ocr_result || text : text}
-          </Text>
-          {record.manual_validated && (
-            <div>
-              <Text style={{ color: '#52c41a', fontSize: 12 }}>
-                → {record.container_no}
-              </Text>
-            </div>
-          )}
-          {!record.isValid && !record.manual_validated && (
-            <div>
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {reasonLabel(record.validationReason)}
-              </Text>
-            </div>
-          )}
-          {record.imageTextDetected && record.imageValidationStatus === 'MISMATCH' && (
-            <div>
-              <Text type="secondary" style={{ fontSize: 11, color: '#ff4d4f' }}>
-                Gambar: {record.imageTextDetected}
-              </Text>
-            </div>
-          )}
-        </div>
-      ),
+        <Text style={{ 
+          color: record.validation_status === 'VALID' ? '#52c41a' : 
+                 record.validation_status === 'INVALID' ? '#ff4d4f' : 'inherit',
+          fontWeight: 'bold'
+        }}>
+          {text || '-'}
+        </Text>
+      )
+    },
+    {
+      title: 'Nomor dari Gambar',
+      dataIndex: 'correct_container_no',
+      width: 150,
+      render: (text) => text || '-'
     },
     {
       title: 'Waktu Scan',
       dataIndex: 'scan_time',
-      key: 'scan_time',
-      width: 175,
-      render: t => dayjs(t).format('DD/MM/YYYY HH:mm:ss'),
-      sorter: (a, b) => new Date(a.scan_time) - new Date(b.scan_time),
-      defaultSortOrder: 'descend',
-    },
-    {
-      title: 'Confidence',
-      dataIndex: 'confidence',
-      key: 'confidence',
-      width: 130,
-      align: 'center',
-      sorter: (a, b) => a.confidence - b.confidence,
-      render: (pct) => (
-        <Progress
-          percent={pct}
-          size="small"
-          status={pct >= 90 ? 'success' : pct >= 70 ? 'normal' : 'exception'}
-          format={p => `${p}%`}
-          strokeWidth={6}
-        />
-      ),
+      width: 150,
+      render: t => dayjs(t).format('DD/MM/YYYY HH:mm')
     },
     {
       title: 'Gambar',
-      key: 'imageCount',
-      width: 90,
+      key: 'images',
+      width: 60,
       align: 'center',
       render: (_, record) => (
         <Badge count={record.images.length} color="#1890ff" showZero>
-          <PictureOutlined style={{ fontSize: 18, color: record.images.length ? '#1890ff' : '#ccc' }} />
+          <PictureOutlined style={{ fontSize: 18 }} />
         </Badge>
-      ),
+      )
     },
     {
       title: 'Aksi',
       key: 'action',
-      width: 180,
-      align: 'center',
+      width: 160,
       fixed: 'right',
       render: (_, record) => (
         <Space size="small">
@@ -781,360 +760,257 @@ const ContainerValidation = () => {
             type="primary"
             size="small"
             icon={<ScanOutlined />}
-            onClick={() => handleValidateRecord(record)}
-            loading={validatingImage}
-            disabled={!record.images.length}
+            onClick={() => validateSingleRecord(record)}
+            loading={ocrLoading}
+            disabled={!record.images || record.images.length === 0}
           >
             Cek
           </Button>
           <Button
-            type="default"
             size="small"
             icon={<EyeOutlined />}
-            onClick={() => { setSelectedRecord(record); setImageModalVisible(true); }}
-            disabled={!record.images.length}
-          >
-            Lihat
-          </Button>
+            onClick={() => {
+              setSelectedRecord(record);
+              setImageModalVisible(true);
+            }}
+            disabled={!record.images || record.images.length === 0}
+          />
           <Button
             type="link"
             size="small"
             icon={<EditOutlined />}
-            onClick={() => openValidationModal(record)}
+            onClick={() => openManualValidation(record)}
           >
             Perbaiki
           </Button>
         </Space>
-      ),
-    },
+      )
+    }
   ];
 
   // ============================================================
-  // Render
+  // RENDER
   // ============================================================
   return (
     <div style={{ padding: 24, background: '#f0f2f5', minHeight: '100vh' }}>
       {contextHolder}
 
-      {/* ── Header ── */}
+      {/* HEADER */}
       <div style={{
-        background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)',
-        borderRadius: 12, padding: '24px 28px', marginBottom: 24,
-        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+        background: 'linear-gradient(135deg, #001529 0%, #002140 100%)',
+        borderRadius: 12,
+        padding: '20px 24px',
+        marginBottom: 24,
+        boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <div style={{
-            background: 'rgba(255,77,79,0.2)', border: '1px solid rgba(255,77,79,0.5)',
-            borderRadius: 10, padding: 12,
-          }}>
-            <SafetyCertificateOutlined style={{ fontSize: 28, color: '#ff4d4f' }} />
-          </div>
-          <div>
-            <Title level={3} style={{ color: '#fff', margin: 0 }}>
-              Container Validation dengan AUTO DETECT
-            </Title>
-            <Text style={{ color: 'rgba(255,255,255,0.65)', fontSize: 13 }}>
-              Validasi otomatis OCR vs Gambar menggunakan Tesseract.js
-            </Text>
-          </div>
-        </div>
+        <Title level={3} style={{ color: 'white', margin: 0 }}>
+          <SafetyCertificateOutlined style={{ marginRight: 12 }} />
+          Validasi Container (OFFLINE OCR)
+        </Title>
+        <Text style={{ color: 'rgba(255,255,255,0.7)' }}>
+          Membaca nomor container langsung dari gambar menggunakan Tesseract.js
+        </Text>
       </div>
 
-      {/* ── Statistik Lengkap ── */}
+      {/* STATISTIK */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#e6f7ff', border: '1px solid #1890ff30' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>Total Scan</Text>}
-              value={stats.total}
-              valueStyle={{ color: '#1890ff', fontSize: 22, fontWeight: 700 }}
-              prefix={<SearchOutlined />}
+        <Col span={4}>
+          <Card>
+            <Statistic title="Total Scan" value={stats.total} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card>
+            <Statistic 
+              title="Format Valid" 
+              value={stats.formatValid} 
+              valueStyle={{ color: '#52c41a' }}
             />
           </Card>
         </Col>
-        
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#f6ffed', border: '1px solid #52c41a30' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>Format Valid</Text>}
-              value={stats.valid}
-              valueStyle={{ color: '#52c41a', fontSize: 22, fontWeight: 700 }}
-              prefix={<CheckCircleOutlined />}
-              suffix={`(${stats.validPct}%)`}
+        <Col span={4}>
+          <Card>
+            <Statistic 
+              title="Format Invalid" 
+              value={stats.formatInvalid} 
+              valueStyle={{ color: '#ff4d4f' }}
             />
           </Card>
         </Col>
-        
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#fff1f0', border: '1px solid #ff4d4f30' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>Format Invalid</Text>}
-              value={stats.invalid}
-              valueStyle={{ color: '#ff4d4f', fontSize: 22, fontWeight: 700 }}
-              prefix={<CloseCircleOutlined />}
+        <Col span={4}>
+          <Card style={{ background: '#f6ffed' }}>
+            <Statistic 
+              title="✓ Valid Gambar" 
+              value={stats.validImage} 
+              valueStyle={{ color: '#52c41a' }}
             />
           </Card>
         </Col>
-        
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#f6ffed', border: '1px solid #52c41a30' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>✅ Cocok Gambar</Text>}
-              value={stats.matchCount}
-              valueStyle={{ color: '#52c41a', fontSize: 22, fontWeight: 700 }}
-              prefix={<CheckCircleOutlined />}
+        <Col span={4}>
+          <Card style={{ background: '#fff1f0' }}>
+            <Statistic 
+              title="✗ Invalid Gambar" 
+              value={stats.invalidImage} 
+              valueStyle={{ color: '#ff4d4f' }}
             />
           </Card>
         </Col>
-        
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#fff1f0', border: '1px solid #ff4d4f30' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>❌ Tidak Cocok</Text>}
-              value={stats.mismatchCount}
-              valueStyle={{ color: '#ff4d4f', fontSize: 22, fontWeight: 700 }}
-              prefix={<CloseCircleOutlined />}
-            />
-          </Card>
-        </Col>
-        
-        <Col xs={24} sm={12} md={8} lg={6} xl={4}>
-          <Card size="small" style={{ borderRadius: 10, background: '#fff7e6', border: '1px solid #fa8c1630' }}>
-            <Statistic
-              title={<Text style={{ fontSize: 12 }}>✏️ Manual Fix</Text>}
-              value={stats.manualFixCount}
-              valueStyle={{ color: '#fa8c16', fontSize: 22, fontWeight: 700 }}
-              prefix={<EditOutlined />}
+        <Col span={4}>
+          <Card style={{ background: '#e6f7ff' }}>
+            <Statistic 
+              title="⏳ Belum Dicek" 
+              value={stats.unchecked} 
+              valueStyle={{ color: '#1890ff' }}
             />
           </Card>
         </Col>
       </Row>
 
-      {/* ── Filter & Actions ── */}
-      <Card style={{ marginBottom: 16, borderRadius: 10 }} bodyStyle={{ padding: '16px 20px' }}>
-        <Row gutter={[12, 12]} align="middle">
-          <Col xs={24} md={8}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <CalendarOutlined style={{ color: '#1890ff' }} />
-              <Text strong style={{ whiteSpace: 'nowrap' }}>Periode:</Text>
-              <RangePicker
-                showTime
-                format="DD/MM/YYYY HH:mm"
-                style={{ flex: 1 }}
-                onChange={setDateRange}
-                placeholder={['Tanggal Mulai', 'Tanggal Selesai']}
-              />
-            </div>
+      {/* FILTER DAN ACTION */}
+      <Card style={{ marginBottom: 16, borderRadius: 8 }}>
+        <Row gutter={16} align="middle">
+          <Col span={6}>
+            <RangePicker
+              showTime
+              format="DD/MM/YYYY HH:mm"
+              style={{ width: '100%' }}
+              onChange={setDateRange}
+              placeholder={['Dari', 'Sampai']}
+            />
           </Col>
-          <Col xs={12} md={5}>
+          <Col span={4}>
             <Select
               style={{ width: '100%' }}
               value={selectedStatus}
               onChange={setSelectedStatus}
             >
               <Option value="all">🔵 Semua Data</Option>
-              <Option value="valid">✅ Format Valid</Option>
-              <Option value="invalid">❌ Format Invalid</Option>
-              <Option value="match">✅ Cocok Gambar</Option>
-              <Option value="mismatch">❌ Tidak Cocok</Option>
-              <Option value="manual">✏️ Manual Fix</Option>
-              <Option value="unchecked">⏳ Belum Validasi</Option>
+              <Option value="format_valid">✅ Format Valid</Option>
+              <Option value="format_invalid">❌ Format Invalid</Option>
+              <Option value="image_valid">✓ Valid Gambar</Option>
+              <Option value="image_invalid">✗ Invalid Gambar</Option>
+              <Option value="unchecked">⏳ Belum Dicek</Option>
             </Select>
           </Col>
-          <Col xs={12} md={6}>
+          <Col span={6}>
             <Input
-              placeholder="Cari container / ID scan..."
+              placeholder="Cari container number..."
               prefix={<SearchOutlined />}
               value={searchText}
               onChange={e => setSearchText(e.target.value)}
               allowClear
             />
           </Col>
-          <Col xs={24} md={3}>
+          <Col span={4}>
             <Button
               type="primary"
-              icon={<ReloadOutlined />}
-              onClick={fetchData}
-              loading={loading}
+              icon={<ScanOutlined />}
+              onClick={validateAllRecords}
+              loading={validating}
               block
+              disabled={stats.unchecked === 0}
             >
-              Refresh
+              Validasi Semua
             </Button>
           </Col>
-        </Row>
-
-        <Divider style={{ margin: '12px 0' }} />
-
-        <Row justify="space-between" align="middle">
-          <Col>
-            <Space>
-              <Button
-                type="primary"
-                icon={<FilePdfOutlined />}
-                onClick={downloadPDF}
-                style={{ background: '#ff4d4f', borderColor: '#ff4d4f' }}
-                size="large"
-              >
-                Download PDF Laporan
-              </Button>
-              <Text type="secondary" style={{ marginLeft: 8 }}>
-                (Data sesuai filter & range waktu)
-              </Text>
-            </Space>
-          </Col>
-          <Col>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Menampilkan <Text strong>{filteredData.length}</Text> dari{' '}
-              <Text strong>{rawData.length}</Text> data
-              {filteredData.filter(d => d.imageValidationStatus === 'MISMATCH').length > 0 && (
-                <Text type="danger">
-                  {' '}(❌ {filteredData.filter(d => d.imageValidationStatus === 'MISMATCH').length} tidak cocok)
-                </Text>
-              )}
-            </Text>
+          <Col span={4}>
+            <Button
+              icon={<FilePdfOutlined />}
+              onClick={downloadPDF}
+              block
+            >
+              Download PDF
+            </Button>
           </Col>
         </Row>
       </Card>
 
-      {/* ── Tabel ── */}
-      <Card style={{ borderRadius: 10 }} bodyStyle={{ padding: 0 }}>
+      {/* INFO TESSERACT */}
+      <Alert
+        message="OCR Offline dengan Tesseract.js"
+        description="Membaca nomor container langsung dari gambar secara offline. Hasil tidak 100% akurat, gunakan tombol 'Perbaiki' untuk koreksi manual."
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+      />
+
+      {/* TABEL */}
+      <Card style={{ borderRadius: 8 }} bodyStyle={{ padding: 0 }}>
         <Table
           columns={columns}
           dataSource={filteredData}
           rowKey="id"
           loading={loading}
-          size="middle"
           scroll={{ x: 1400 }}
-          pagination={{
+          pagination={{ 
             pageSize: 20,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            pageSizeOptions: ['10', '20', '50', '100'],
-            showTotal: total => `Total ${total} data`,
+            showTotal: total => `Total ${total} data`
           }}
           rowClassName={record => {
-            if (record.manual_validated) return 'row-manual';
-            if (record.imageValidationStatus === 'MATCH') return 'row-match';
-            if (record.imageValidationStatus === 'MISMATCH') return 'row-mismatch';
-            return record.isValid ? 'row-valid' : 'row-invalid';
+            if (record.validation_status === 'VALID') return 'row-valid';
+            if (record.validation_status === 'INVALID') return 'row-invalid';
+            if (!record.validation_status && record.images?.length > 0) return 'row-pending';
+            return '';
           }}
         />
       </Card>
 
-      {/* ── Modal Gambar ── */}
+      {/* MODAL LIHAT GAMBAR */}
       <Modal
-        title={
-          <Space>
-            <PictureOutlined style={{ color: '#1890ff' }} />
-            <span>
-              Gambar Container:{' '}
-              <Text strong style={{ color: selectedRecord?.isValid ? '#52c41a' : '#ff4d4f' }}>
-                {selectedRecord?.container_no || '(kosong)'}
-              </Text>
-            </span>
-            {selectedRecord && (
-              selectedRecord.isValid
-                ? <Tag color="success">✅ VALID</Tag>
-                : <Tag color="error">❌ INVALID</Tag>
-            )}
-          </Space>
-        }
+        title={`Gambar Container: ${selectedRecord?.container_no || ''}`}
         open={imageModalVisible}
-        onCancel={() => { setImageModalVisible(false); setSelectedRecord(null); }}
+        onCancel={() => setImageModalVisible(false)}
         footer={null}
-        width={920}
-        styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
+        width={900}
       >
         {selectedRecord && (
           <>
-            <div style={{
-              background: selectedRecord.isValid ? '#f6ffed' : '#fff1f0',
-              border: `1px solid ${selectedRecord.isValid ? '#b7eb8f' : '#ffa39e'}`,
-              borderRadius: 8, padding: '10px 16px', marginBottom: 16,
-            }}>
-              <Row gutter={24}>
-                <Col span={12}>
-                  <Text type="secondary">Container No (OCR): </Text>
-                  <Text strong style={{ color: selectedRecord.isValid ? '#52c41a' : '#ff4d4f' }}>
-                    {selectedRecord.container_no || '(kosong)'}
-                  </Text>
+            <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 8 }}>
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Text type="secondary">Hasil OCR:</Text>
+                  <div><Text strong>{selectedRecord.container_no}</Text></div>
                 </Col>
-                <Col span={12}>
-                  <Text type="secondary">Status Format: </Text>
-                  <Text>{reasonLabel(selectedRecord.validationReason)}</Text>
+                <Col span={8}>
+                  <Text type="secondary">Dari Gambar:</Text>
+                  <div>
+                    <Text strong style={{ color: selectedRecord.correct_container_no ? '#52c41a' : '#999' }}>
+                      {selectedRecord.correct_container_no || 'Belum dibaca'}
+                    </Text>
+                  </div>
                 </Col>
-                <Col span={12}>
-                  <Text type="secondary">Waktu Scan: </Text>
-                  <Text>{dayjs(selectedRecord.scan_time).format('DD/MM/YYYY HH:mm:ss')}</Text>
-                </Col>
-                <Col span={12}>
-                  <Text type="secondary">Jumlah Gambar: </Text>
-                  <Text strong>{selectedRecord.images.length}</Text>
+                <Col span={8}>
+                  <Text type="secondary">Status:</Text>
+                  <div>
+                    {selectedRecord.validation_status === 'VALID' && <Tag color="success">✓ VALID</Tag>}
+                    {selectedRecord.validation_status === 'INVALID' && <Tag color="error">✗ INVALID</Tag>}
+                    {!selectedRecord.validation_status && <Tag color="default">⏳ BELUM</Tag>}
+                  </div>
                 </Col>
               </Row>
             </div>
-
-            {selectedRecord.images.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>
-                <PictureOutlined style={{ fontSize: 48 }} />
-                <div style={{ marginTop: 12 }}>Tidak ada gambar tersedia</div>
-              </div>
-            ) : (
-              <Image.PreviewGroup>
-                <Row gutter={[12, 12]}>
-                  {selectedRecord.images.map((img, idx) => (
-                    <Col key={idx} xs={24} sm={12} md={8}>
-                      <Card
-                        size="small"
-                        style={{ borderRadius: 8 }}
-                        cover={
-                          <Image
-                            src={`${API_BASE}/images/${img}`}
-                            alt={`Gambar ${idx + 1}`}
-                            style={{ height: 180, objectFit: 'cover' }}
-                            fallback="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE4MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LXNpemU9IjE0IiBmaWxsPSIjYWFhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+"
-                          />
-                        }
-                      >
-                        <Button 
-                          type="link" 
-                          size="small"
-                          icon={<ScanOutlined />}
-                          onClick={async () => {
-                            const result = await extractContainerFromImage(`${API_BASE}/images/${img}`);
-                            if (result) {
-                              Modal.info({
-                                title: 'Hasil OCR Gambar',
-                                content: (
-                                  <div>
-                                    <p>Nomor container terdeteksi:</p>
-                                    <Text strong style={{ fontSize: 20, color: '#1890ff' }}>{result}</Text>
-                                  </div>
-                                ),
-                              });
-                            } else {
-                              message.warning('Tidak dapat membaca nomor container');
-                            }
-                          }}
-                        >
-                          OCR Gambar
-                        </Button>
-                      </Card>
-                    </Col>
-                  ))}
-                </Row>
-              </Image.PreviewGroup>
-            )}
+            <Image.PreviewGroup>
+              <Row gutter={[8, 8]}>
+                {selectedRecord.images.map((img, idx) => (
+                  <Col key={idx} span={8}>
+                    <Image
+                      src={`${API_BASE}/images/${img}`}
+                      style={{ height: 180, objectFit: 'contain' }}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </Image.PreviewGroup>
           </>
         )}
       </Modal>
 
-      {/* ── Modal Validasi Manual ── */}
+      {/* MODAL VALIDASI MANUAL */}
       <Modal
         title={
           <Space>
             <EditOutlined style={{ color: '#fa8c16' }} />
-            <span>Validasi Manual Container</span>
+            <span>Perbaiki Nomor Container Manual</span>
           </Space>
         }
         open={validationModalVisible}
@@ -1147,40 +1023,29 @@ const ContainerValidation = () => {
             key="submit" 
             type="primary" 
             onClick={handleManualValidation}
-            icon={<CheckCircleOutlined />}
             style={{ background: '#52c41a', borderColor: '#52c41a' }}
           >
             Simpan Perbaikan
           </Button>
         ]}
-        width={1000}
+        width={900}
       >
         {validationRecord && (
           <div>
-            {validationResult && !validationResult.match && (
+            {ocrResult && (
               <Alert
-                message="Ketidaksesuaian Terdeteksi!"
+                message="Hasil OCR dari Gambar"
                 description={
                   <div>
-                    <p><strong>Hasil OCR (Database):</strong> {validationResult.ocrResult || '(kosong)'}</p>
-                    <p><strong>Nomor dari Gambar:</strong> {validationResult.containerFromImage || 'Tidak terbaca'}</p>
-                    <p><strong>Tingkat Kemiripan:</strong> {validationResult.similarity}%</p>
-                    <p style={{ color: '#ff4d4f', marginTop: 8 }}>
-                      Nomor container tidak sesuai dengan gambar. Silakan perbaiki secara manual.
-                    </p>
+                    <Text strong style={{ fontSize: 18 }}>{ocrResult}</Text>
+                    {ocrResult !== validationRecord.container_no && (
+                      <div style={{ marginTop: 8, color: '#ff4d4f' }}>
+                        ⚠️ Berbeda dengan hasil OCR sistem ({validationRecord.container_no})
+                      </div>
+                    )}
                   </div>
                 }
-                type="error"
-                showIcon
-                style={{ marginBottom: 16 }}
-              />
-            )}
-            
-            {validationResult && validationResult.match && (
-              <Alert
-                message="✅ Container Sudah Sesuai"
-                description={`Nomor container ${validationResult.containerFromImage} sudah cocok dengan gambar.`}
-                type="success"
+                type="info"
                 showIcon
                 style={{ marginBottom: 16 }}
               />
@@ -1188,96 +1053,51 @@ const ContainerValidation = () => {
 
             <Row gutter={16}>
               <Col span={12}>
-                <Card 
-                  size="small" 
-                  title="Hasil OCR (Database)" 
-                  style={{ background: '#fff1f0', borderColor: '#ff4d4f' }}
-                >
-                  <Text strong style={{ color: '#ff4d4f', fontSize: 24, fontFamily: 'monospace' }}>
-                    {validationRecord.container_no || '(kosong)'}
+                <Card size="small" title="Hasil OCR (Database)">
+                  <Text strong style={{ fontSize: 20, color: '#ff4d4f' }}>
+                    {validationRecord.container_no || '-'}
                   </Text>
-                  {validationRecord.original_ocr_result && (
-                    <div style={{ marginTop: 8 }}>
-                      <Text type="secondary">Original OCR: </Text>
-                      <Text delete>{validationRecord.original_ocr_result}</Text>
-                    </div>
-                  )}
                 </Card>
               </Col>
-              
               <Col span={12}>
-                <Card 
-                  size="small" 
-                  title="Perbaikan Manual" 
-                  style={{ background: '#f6ffed', borderColor: '#52c41a' }}
-                >
+                <Card size="small" title="Input Manual (BENAR)">
                   <Input
                     size="large"
                     value={manualContainerNo}
                     onChange={(e) => setManualContainerNo(e.target.value.toUpperCase())}
-                    placeholder="Masukkan nomor container yang benar"
+                    placeholder="Masukkan nomor dari gambar"
                     style={{ fontSize: 20, fontFamily: 'monospace' }}
                   />
-                  <div style={{ marginTop: 8 }}>
-                    <Text type="secondary">Format: 4 huruf + 7 angka (contoh: EMCU8485224)</Text>
-                  </div>
                 </Card>
               </Col>
             </Row>
 
-            <Divider>
-              <Space>
-                <ScanOutlined />
-                Hasil OCR dari Gambar
-              </Space>
-            </Divider>
+            <Divider>Gambar Container</Divider>
 
-            <Row gutter={[8, 8]}>
-              {validationRecord.images.slice(0, 3).map((img, idx) => (
-                <Col key={idx} span={8}>
-                  <Card
-                    size="small"
-                    cover={
-                      <img
-                        src={`${API_BASE}/images/${img}`}
-                        style={{ height: 150, objectFit: 'cover' }}
-                      />
-                    }
-                  >
-                    <Button 
-                      type="link" 
-                      size="small"
-                      block
-                      onClick={async () => {
-                        const result = await extractContainerFromImage(`${API_BASE}/images/${img}`);
-                        if (result) {
-                          setManualContainerNo(result);
-                          message.success(`Nomor container dari gambar: ${result}`);
-                        }
-                      }}
-                    >
-                      Gunakan Nomor Ini
-                    </Button>
-                  </Card>
-                </Col>
-              ))}
-            </Row>
+            <Image.PreviewGroup>
+              <Row gutter={[8, 8]}>
+                {validationRecord.images.map((img, idx) => (
+                  <Col key={idx} span={8}>
+                    <Image
+                      src={`${API_BASE}/images/${img}`}
+                      style={{ height: 150, objectFit: 'contain' }}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </Image.PreviewGroup>
           </div>
         )}
       </Modal>
 
-      {/* ── Global row styles ── */}
+      {/* STYLE ROW */}
       <style>{`
-        .row-valid td  { background: #f6ffed !important; }
-        .row-invalid td { background: #fff1f0 !important; }
-        .row-match td { background: #f6ffed !important; }
-        .row-mismatch td { background: #fff1f0 !important; border-left: 4px solid #ff4d4f !important; }
-        .row-manual td { background: #fff7e6 !important; border-left: 4px solid #fa8c16 !important; }
-        .row-valid:hover td  { background: #d9f7be !important; }
+        .row-valid td { background: #f6ffed !important; }
+        .row-invalid td { background: #fff1f0 !important; border-left: 4px solid #ff4d4f !important; }
+        .row-pending td { background: #e6f7ff !important; }
+        .row-valid:hover td { background: #d9f7be !important; }
         .row-invalid:hover td { background: #ffccc7 !important; }
-        .row-match:hover td { background: #d9f7be !important; }
-        .row-mismatch:hover td { background: #ffccc7 !important; }
-        .row-manual:hover td { background: #ffe7ba !important; }
+        .row-pending:hover td { background: #bae7ff !important; }
       `}</style>
     </div>
   );
