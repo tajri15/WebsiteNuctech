@@ -673,10 +673,6 @@ io.on('connection', (socket) => {
     });
 });
 
-// =======================================================================
-// === LOG FILE WATCHER ===
-// =======================================================================
-
 if (!fs.existsSync(LOG_FILE_PATH)) {
     console.error(`❌ KRITIS: File log tidak ditemukan: ${LOG_FILE_PATH}`);
     console.log('⚠️  Server tetap berjalan tanpa file log monitoring');
@@ -705,7 +701,71 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                             const parsed = parseLogLine(line);
                             if (parsed && parsed.type === 'SCAN') {
                                 const pData = parsed.data;
+                                
                                 try {
+                                    const checkExisting = await db.query(
+                                        'SELECT id, scan_time, created_at FROM scans WHERE id_scan = $1',
+                                        [pData.idScan]
+                                    );
+
+                                    // Jika data sudah ada
+                                    if (checkExisting.rows.length > 0) {
+                                        const existingData = checkExisting.rows[0];
+                                        const existingTime = new Date(existingData.scan_time);
+                                        const newTime = new Date(pData.scanTime);
+                                        const timeDiffMinutes = Math.abs(newTime - existingTime) / (1000 * 60);
+                                        
+                                        console.log(`⚠️ Duplicate ID scan detected: ${pData.idScan}`);
+                                        console.log(`   - Existing time: ${existingTime.toISOString()}`);
+                                        console.log(`   - New time: ${newTime.toISOString()}`);
+                                        console.log(`   - Time difference: ${timeDiffMinutes.toFixed(2)} minutes`);
+                                        
+                                        if (timeDiffMinutes > 5) {
+                                            // Ini adalah retry dari data lama (seperti kasus 02:39 ke 02:48)
+                                            console.log(`⏭️  SKIP - Data lama di-retry (beda ${timeDiffMinutes.toFixed(2)} menit): ${pData.idScan}`);
+                                            continue; // Skip insert, lanjut ke line berikutnya
+                                        } else {
+                                            // Perbedaan waktu kecil, mungkin update dari data yang sama
+                                            console.log(`🔄 UPDATE - Data dalam rentang 5 menit, update jika lebih baru: ${pData.idScan}`);
+                                            
+                                            // Update hanya jika data baru lebih baru dari data existing
+                                            if (newTime > existingTime) {
+                                                const updateRes = await db.query(
+                                                    `UPDATE scans SET
+                                                        container_no = $1,
+                                                        truck_no = $2,
+                                                        scan_time = $3,
+                                                        status = $4,
+                                                        error_message = $5,
+                                                        image1_path = $6,
+                                                        image2_path = $7,
+                                                        image3_path = $8,
+                                                        image4_path = $9,
+                                                        image5_path = $10,
+                                                        image6_path = $11,
+                                                        updated_at = NOW()
+                                                     WHERE id_scan = $12
+                                                     RETURNING *`,
+                                                    [
+                                                        pData.containerNo, pData.truckNo,
+                                                        pData.scanTime, pData.status, pData.errorMessage,
+                                                        pData.image1_path, pData.image2_path, pData.image3_path,
+                                                        pData.image4_path, pData.image5_path, pData.image6_path,
+                                                        pData.idScan
+                                                    ]
+                                                );
+                                                
+                                                if (updateRes.rows.length > 0) {
+                                                    console.log(`✅ Scan UPDATED: ${pData.idScan} dengan data lebih baru`);
+                                                    io.emit('scan_updated', updateRes.rows[0]);
+                                                }
+                                            } else {
+                                                console.log(`⏭️  SKIP - Data existing lebih baru: ${pData.idScan}`);
+                                            }
+                                            continue;
+                                        }
+                                    }
+
                                     const dbRes = await db.query(
                                         `INSERT INTO scans(
                                             id_scan, container_no, truck_no, scan_time, 
@@ -722,8 +782,9 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                             pData.image4_path, pData.image5_path, pData.image6_path
                                         ]
                                     );
+                                    
                                     const newScan = dbRes.rows[0];
-                                    console.log(`✅ Scan saved: ID ${newScan.id}, Container: ${newScan.container_no}, Status: ${newScan.status}`);
+                                    console.log(`✅ NEW SCAN saved: ID ${newScan.id}, Container: ${newScan.container_no}, Status: ${newScan.status}`);
                                     io.emit('new_scan', newScan);
 
                                     // Update stats
@@ -732,6 +793,7 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                         db.query(`SELECT COUNT(*) FROM scans WHERE status='OK'`),
                                         db.query(`SELECT COUNT(*) FROM scans WHERE status='NOK'`)
                                     ]);
+                                    
                                     io.emit('stats_update', { 
                                         total: parseInt(tr.rows[0].count), 
                                         ok: parseInt(ok.rows[0].count), 
@@ -739,9 +801,37 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
                                     });
 
                                 } catch (dbErr) {
-                                    console.error('❌ Database insert error:', dbErr.message);
+                                    // Handle unique constraint violation jika ada
+                                    if (dbErr.code === '23505') { // PostgreSQL unique violation
+                                        console.log(`⚠️ Unique constraint violation untuk ${pData.idScan} - data sudah ada`);
+                                    } else {
+                                        console.error('❌ Database error:', dbErr.message);
+                                    }
                                 }
                             }
+                            
+                            if (parsed && parsed.type === 'FTP_UPLOAD') {
+                                io.emit('ftp_update', {
+                                    ftpServer: {
+                                        status: 'uploading',
+                                        lastActivity: parsed.data.timestamp,
+                                        details: `Uploading: ${parsed.data.file}`,
+                                        currentActivity: `Mengupload ${parsed.data.file}`
+                                    }
+                                });
+                            }
+                            
+                            if (parsed && parsed.type === 'FTP_ERROR') {
+                                io.emit('ftp_update', {
+                                    ftpServer: {
+                                        status: 'error',
+                                        lastActivity: parsed.data.timestamp,
+                                        details: parsed.data.error,
+                                        currentActivity: 'Error - perlu perhatian'
+                                    }
+                                });
+                            }
+                            
                         } catch (lineErr) { 
                             console.error('❌ Line error:', lineErr); 
                         }
@@ -757,9 +847,16 @@ if (!fs.existsSync(LOG_FILE_PATH)) {
         }
     });
 
-    watcher.on('add',   (f) => { try { lastSize = fs.statSync(f).size; } catch (e) {} });
+    watcher.on('add', (f) => { 
+        try { 
+            lastSize = fs.statSync(f).size; 
+            console.log(`📄 File added/watched: ${f}`);
+        } catch (e) {} 
+    });
+    
     watcher.on('error', (e) => console.error('❌ Watcher error:', e));
-    console.log(`✅ Log file watcher aktif`);
+    
+    console.log(`✅ Log file watcher aktif dengan proteksi duplikasi`);
 }
 
 // =======================================================================
