@@ -27,7 +27,6 @@ import {
   SearchOutlined,
   EyeOutlined,
   WarningOutlined,
-  FileExcelOutlined,
   FilePdfOutlined,
   PictureOutlined,
   SafetyCertificateOutlined,
@@ -37,7 +36,6 @@ import {
   EditOutlined,
   QuestionCircleOutlined
 } from '@ant-design/icons';
-import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import dayjs from 'dayjs';
@@ -168,7 +166,6 @@ const ContainerValidation = () => {
       console.log('📝 OCR Result Text:', text);
       
       // Pattern untuk container number: 4 huruf + 7 angka
-      // Bisa dengan spasi atau tanpa spasi
       const containerPattern = /\b([A-Z]{4})\s*(\d{7})\b/;
       const match = text.match(containerPattern);
       
@@ -365,79 +362,186 @@ const ContainerValidation = () => {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // ============================================================
-  // Export Excel (Invalid only)
-  // ============================================================
-  const downloadExcel = () => {
-    const invalid = filteredData.filter(d => !d.isValid);
-    if (!invalid.length) { messageApi.warning('Tidak ada data invalid untuk didownload'); return; }
-
-    const rows = invalid.map((item, i) => ({
-      'No':           i + 1,
-      'ID Scan':      item.id_scan || '-',
-      'Container No (OCR)': item.container_no || '(kosong)',
-      'Container No (Gambar)': item.imageTextDetected || '-',
-      'Status Validasi': item.imageValidationStatus || 'UNCHECKED',
-      'Alasan':       reasonLabel(item.validationReason),
-      'Waktu Scan':   dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss'),
-      'No. Truck':    item.truck_no || '-',
-      'Jml Gambar':   item.images.length,
-    }));
-
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [
-      { wch: 5 }, { wch: 22 }, { wch: 22 }, { wch: 22 },
-      { wch: 15 }, { wch: 20 }, { wch: 22 }, { wch: 15 }, { wch: 12 },
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Invalid Containers');
-    XLSX.writeFile(wb, `Invalid_Containers_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`);
-    messageApi.success('File Excel berhasil didownload');
-  };
-
-  // ============================================================
-  // Export PDF (Invalid only)
+  // FUNGSI DOWNLOAD PDF DENGAN RANGE WAKTU
   // ============================================================
   const downloadPDF = () => {
-    const invalid = filteredData.filter(d => !d.isValid);
-    if (!invalid.length) { messageApi.warning('Tidak ada data invalid untuk didownload'); return; }
-
-    const doc = new jsPDF({ orientation: 'landscape' });
-
-    doc.setFontSize(16);
-    doc.setTextColor(220, 53, 69);
-    doc.text('Laporan Container Invalid', 14, 18);
-
-    doc.setFontSize(9);
-    doc.setTextColor(80);
-    doc.text(`Dicetak: ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`, 14, 25);
-    if (dateRange) {
-      doc.text(
-        `Periode: ${dateRange[0].format('DD/MM/YYYY HH:mm')} — ${dateRange[1].format('DD/MM/YYYY HH:mm')}`,
-        14, 30
-      );
+    // Ambil data yang sudah difilter (sesuai range waktu dan filter lainnya)
+    const dataToExport = filteredData;
+    
+    if (!dataToExport.length) { 
+      messageApi.warning('Tidak ada data untuk didownload'); 
+      return; 
     }
-    doc.text(`Total Invalid: ${invalid.length} container`, 14, 35);
 
+    // Hitung statistik untuk laporan
+    const totalData = dataToExport.length;
+    const validFormat = dataToExport.filter(d => d.isValid).length;
+    const invalidFormat = totalData - validFormat;
+    const matchGambar = dataToExport.filter(d => d.imageValidationStatus === 'MATCH').length;
+    const mismatchGambar = dataToExport.filter(d => d.imageValidationStatus === 'MISMATCH').length;
+    const manualFix = dataToExport.filter(d => d.manual_validated).length;
+
+    const doc = new jsPDF({ 
+      orientation: 'landscape',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    // ===== HEADER =====
+    doc.setFontSize(18);
+    doc.setTextColor(0, 21, 41);
+    doc.text('LAPORAN VALIDASI CONTAINER', 14, 15);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    
+    // Info periode
+    let periodeText = 'Periode: SEMUA DATA';
+    if (dateRange?.[0] && dateRange?.[1]) {
+      periodeText = `Periode: ${dateRange[0].format('DD/MM/YYYY HH:mm')} - ${dateRange[1].format('DD/MM/YYYY HH:mm')}`;
+    }
+    doc.text(periodeText, 14, 22);
+    
+    // Info filter
+    let filterText = 'Filter: ';
+    switch(selectedStatus) {
+      case 'all': filterText += 'Semua Data'; break;
+      case 'valid': filterText += 'Format Valid'; break;
+      case 'invalid': filterText += 'Format Invalid'; break;
+      case 'match': filterText += 'Cocok Gambar'; break;
+      case 'mismatch': filterText += 'Tidak Cocok Gambar'; break;
+      case 'manual': filterText += 'Manual Fix'; break;
+      case 'unchecked': filterText += 'Belum Validasi'; break;
+      default: filterText += 'Semua Data';
+    }
+    doc.text(filterText, 14, 28);
+    
+    // Tanggal cetak
+    doc.text(`Dicetak: ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`, 14, 34);
+    
+    // ===== STATISTIK RINGKAS =====
+    doc.setFontSize(12);
+    doc.setTextColor(0, 102, 204);
+    doc.text('RINGKASAN STATISTIK', 14, 44);
+    
+    doc.setFontSize(9);
+    doc.setTextColor(50);
+    
+    const statsY = 50;
+    doc.text(`Total Data: ${totalData}`, 14, statsY);
+    doc.text(`Format Valid: ${validFormat} (${totalData > 0 ? ((validFormat/totalData)*100).toFixed(1) : 0}%)`, 14, statsY + 5);
+    doc.text(`Format Invalid: ${invalidFormat} (${totalData > 0 ? ((invalidFormat/totalData)*100).toFixed(1) : 0}%)`, 14, statsY + 10);
+    doc.text(`Cocok Gambar: ${matchGambar}`, 80, statsY);
+    doc.text(`Tidak Cocok: ${mismatchGambar}`, 80, statsY + 5);
+    doc.text(`Manual Fix: ${manualFix}`, 80, statsY + 10);
+
+    // ===== TABEL DATA =====
     autoTable(doc, {
-      startY: 40,
-      head: [['No', 'ID Scan', 'Container No (OCR)', 'Container No (Gambar)', 'Validasi', 'Alasan', 'Waktu Scan']],
-      body: invalid.map((item, i) => [
+      startY: 70,
+      head: [['No', 'ID Scan', 'Container No (OCR)', 'Container No (Gambar)', 'Status Format', 'Validasi Gambar', 'Waktu Scan', 'Jml Gambar']],
+      body: dataToExport.map((item, i) => [
         i + 1,
         item.id_scan || '-',
         item.container_no || '(kosong)',
         item.imageTextDetected || '-',
-        item.imageValidationStatus || 'UNCHECKED',
-        reasonLabel(item.validationReason),
+        item.isValid ? 'VALID' : 'INVALID',
+        item.manual_validated ? 'MANUAL FIX' : 
+        (item.imageValidationStatus === 'MATCH' ? 'COCOK' : 
+         (item.imageValidationStatus === 'MISMATCH' ? 'TIDAK COCOK' : 'BELUM CEK')),
         dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss'),
+        item.images.length.toString()
       ]),
-      styles:          { fontSize: 8, cellPadding: 2 },
-      headStyles:      { fillColor: [220, 53, 69], textColor: 255, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [255, 245, 245] },
+      styles: { 
+        fontSize: 7, 
+        cellPadding: 2,
+        overflow: 'linebreak',
+        cellWidth: 'wrap'
+      },
+      headStyles: { 
+        fillColor: [0, 21, 41], 
+        textColor: 255, 
+        fontStyle: 'bold',
+        halign: 'center'
+      },
+      alternateRowStyles: { fillColor: [245, 245, 245] },
+      columnStyles: {
+        0: { cellWidth: 10, halign: 'center' },
+        1: { cellWidth: 35 },
+        2: { cellWidth: 35 },
+        3: { cellWidth: 35 },
+        4: { cellWidth: 20, halign: 'center' },
+        5: { cellWidth: 25, halign: 'center' },
+        6: { cellWidth: 35, halign: 'center' },
+        7: { cellWidth: 15, halign: 'center' }
+      },
+      didDrawPage: (data) => {
+        // Footer setiap halaman
+        doc.setFontSize(8);
+        doc.setTextColor(150);
+        doc.text(
+          `Halaman ${data.pageNumber} - Sistem Validasi Container Auto-Detect`,
+          data.settings.margin.left,
+          doc.internal.pageSize.height - 10
+        );
+      }
     });
 
-    doc.save(`Invalid_Containers_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
-    messageApi.success('File PDF berhasil didownload');
+    // ===== DATA TIDAK COCOK (HIGHLIGHT) =====
+    const mismatchData = dataToExport.filter(d => 
+      d.imageValidationStatus === 'MISMATCH' && !d.manual_validated
+    );
+    
+    if (mismatchData.length > 0) {
+      doc.addPage();
+      
+      doc.setFontSize(14);
+      doc.setTextColor(255, 0, 0);
+      doc.text('DATA YANG TIDAK COCOK (PERLU DIPERBAIKI)', 14, 20);
+      
+      autoTable(doc, {
+        startY: 30,
+        head: [['No', 'ID Scan', 'OCR Result', 'Dari Gambar', 'Kemiripan', 'Waktu Scan']],
+        body: mismatchData.map((item, i) => [
+          i + 1,
+          item.id_scan || '-',
+          item.container_no || '(kosong)',
+          item.imageTextDetected || '-',
+          `${item.validation_confidence || 0}%`,
+          dayjs(item.scan_time).format('DD/MM/YYYY HH:mm:ss')
+        ]),
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [255, 0, 0], textColor: 255 },
+        columnStyles: {
+          0: { cellWidth: 10 },
+          4: { cellWidth: 20, halign: 'center' }
+        }
+      });
+    }
+
+    // ===== FOOTER =====
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= totalPages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8);
+      doc.setTextColor(150);
+      doc.text(
+        `Nuctech Transmission System - Laporan digenerate ${dayjs().format('DD/MM/YYYY HH:mm:ss')}`,
+        14,
+        doc.internal.pageSize.height - 5
+      );
+    }
+
+    // Generate filename dengan range waktu
+    let filename = 'Laporan_Validasi_Container';
+    if (dateRange?.[0] && dateRange?.[1]) {
+      filename += `_${dateRange[0].format('YYYYMMDD_HHmm')}_${dateRange[1].format('YYYYMMDD_HHmm')}`;
+    } else {
+      filename += `_${dayjs().format('YYYYMMDD_HHmmss')}`;
+    }
+    filename += '.pdf';
+
+    doc.save(filename);
+    messageApi.success(`PDF berhasil didownload: ${mismatchData.length} data tidak cocok`);
   };
 
   // ============================================================
@@ -865,28 +969,26 @@ const ContainerValidation = () => {
           <Col>
             <Space>
               <Button
-                icon={<FileExcelOutlined />}
-                onClick={downloadExcel}
-                style={{ background: '#52c41a', borderColor: '#52c41a', color: '#fff' }}
-              >
-                Excel (Invalid)
-              </Button>
-              <Button
+                type="primary"
                 icon={<FilePdfOutlined />}
                 onClick={downloadPDF}
-                danger
+                style={{ background: '#ff4d4f', borderColor: '#ff4d4f' }}
+                size="large"
               >
-                PDF (Invalid)
+                Download PDF Laporan
               </Button>
+              <Text type="secondary" style={{ marginLeft: 8 }}>
+                (Data sesuai filter & range waktu)
+              </Text>
             </Space>
           </Col>
           <Col>
             <Text type="secondary" style={{ fontSize: 12 }}>
               Menampilkan <Text strong>{filteredData.length}</Text> dari{' '}
               <Text strong>{rawData.length}</Text> data
-              {filteredData.filter(d => !d.isValid).length > 0 && (
+              {filteredData.filter(d => d.imageValidationStatus === 'MISMATCH').length > 0 && (
                 <Text type="danger">
-                  {' '}(❌ {filteredData.filter(d => !d.isValid).length} invalid)
+                  {' '}(❌ {filteredData.filter(d => d.imageValidationStatus === 'MISMATCH').length} tidak cocok)
                 </Text>
               )}
             </Text>
