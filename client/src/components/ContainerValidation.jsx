@@ -30,9 +30,7 @@ import {
   PictureOutlined,
   SafetyCertificateOutlined,
   CalendarOutlined,
-  ScanOutlined,
-  CheckOutlined,
-  StopOutlined
+  ScanOutlined
 } from '@ant-design/icons';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -46,23 +44,6 @@ const { Option } = Select;
 const API_BASE = 'http://localhost:5000';
 
 // ============================================================
-// Validasi format container (4 huruf + 7 angka)
-// ============================================================
-const validateContainerFormat = (containerNo) => {
-  if (!containerNo || containerNo.trim() === '') {
-    return { isValid: false, reason: 'empty' };
-  }
-
-  const pattern = /^[A-Z]{4}\d{7}$/;
-  const trimmed = containerNo.trim().toUpperCase();
-
-  return {
-    isValid: pattern.test(trimmed),
-    reason: pattern.test(trimmed) ? 'valid' : 'invalid_format'
-  };
-};
-
-// ============================================================
 // Main Component
 // ============================================================
 const ContainerValidation = () => {
@@ -70,7 +51,7 @@ const ContainerValidation = () => {
   const [rawData, setRawData] = useState([]);
   const [filteredData, setFilteredData] = useState([]);
   const [dateRange, setDateRange] = useState(null);
-  const [selectedStatus, setSelectedStatus] = useState('all');
+  const [selectedStatus, setSelectedStatus] = useState('all'); // all, valid, invalid, unchecked
   const [searchText, setSearchText] = useState('');
   const [validationModalVisible, setValidationModalVisible] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
@@ -78,11 +59,9 @@ const ContainerValidation = () => {
 
   const [stats, setStats] = useState({
     total: 0,
-    formatValid: 0,
-    formatInvalid: 0,
-    validManual: 0,
-    invalidManual: 0,
-    unchecked: 0
+    valid: 0,      // SESUAI
+    invalid: 0,     // TIDAK SESUAI
+    unchecked: 0    // BELUM
   });
 
   // ============================================================
@@ -97,9 +76,8 @@ const ContainerValidation = () => {
 
       const res = await axios.get(`${API_BASE}/api/container-validation`, { params });
 
-      // Enrich data dengan validasi format
+      // Enrich data
       const enriched = res.data.data.map(item => {
-        const formatValidation = validateContainerFormat(item.container_no);
         const images = [
           item.image1_path, item.image2_path, item.image3_path,
           item.image4_path, item.image5_path, item.image6_path,
@@ -108,10 +86,7 @@ const ContainerValidation = () => {
 
         return {
           ...item,
-          formatValid: formatValidation.isValid,
-          formatReason: formatValidation.reason,
           images,
-          // Status manual validation (dari database)
           manualStatus: item.manual_status || 'UNCHECKED' // 'VALID', 'INVALID', 'UNCHECKED'
         };
       });
@@ -120,19 +95,11 @@ const ContainerValidation = () => {
       
       // Hitung statistik
       const total = enriched.length;
-      const formatValid = enriched.filter(d => d.formatValid).length;
-      const validManual = enriched.filter(d => d.manualStatus === 'VALID').length;
-      const invalidManual = enriched.filter(d => d.manualStatus === 'INVALID').length;
+      const valid = enriched.filter(d => d.manualStatus === 'VALID').length;
+      const invalid = enriched.filter(d => d.manualStatus === 'INVALID').length;
       const unchecked = enriched.filter(d => d.manualStatus === 'UNCHECKED').length;
       
-      setStats({
-        total,
-        formatValid,
-        formatInvalid: total - formatValid,
-        validManual,
-        invalidManual,
-        unchecked
-      });
+      setStats({ total, valid, invalid, unchecked });
       
     } catch (err) {
       console.error(err);
@@ -148,10 +115,8 @@ const ContainerValidation = () => {
   useEffect(() => {
     let d = [...rawData];
     
-    if (selectedStatus === 'format_valid') d = d.filter(x => x.formatValid);
-    if (selectedStatus === 'format_invalid') d = d.filter(x => !x.formatValid);
-    if (selectedStatus === 'manual_valid') d = d.filter(x => x.manualStatus === 'VALID');
-    if (selectedStatus === 'manual_invalid') d = d.filter(x => x.manualStatus === 'INVALID');
+    if (selectedStatus === 'valid') d = d.filter(x => x.manualStatus === 'VALID');
+    if (selectedStatus === 'invalid') d = d.filter(x => x.manualStatus === 'INVALID');
     if (selectedStatus === 'unchecked') d = d.filter(x => x.manualStatus === 'UNCHECKED');
     
     if (searchText.trim()) {
@@ -209,7 +174,7 @@ const ContainerValidation = () => {
     // Header
     doc.setFontSize(16);
     doc.setTextColor(0, 21, 41);
-    doc.text('LAPORAN VALIDASI MANUAL CONTAINER', 14, 15);
+    doc.text('LAPORAN VALIDASI CONTAINER', 14, 15);
 
     doc.setFontSize(10);
     doc.setTextColor(100);
@@ -226,39 +191,37 @@ const ContainerValidation = () => {
     doc.text('RINGKASAN', 14, 38);
     doc.setFontSize(9);
     doc.text(`Total Data: ${filteredData.length}`, 14, 45);
-    doc.text(`Sudah Validasi: ${filteredData.filter(d => d.manualStatus !== 'UNCHECKED').length}`, 14, 52);
-    doc.text(`- Sesuai: ${filteredData.filter(d => d.manualStatus === 'VALID').length}`, 20, 59);
-    doc.text(`- Tidak Sesuai: ${filteredData.filter(d => d.manualStatus === 'INVALID').length}`, 20, 66);
-    doc.text(`Belum Validasi: ${filteredData.filter(d => d.manualStatus === 'UNCHECKED').length}`, 14, 73);
+    doc.text(`✓ Sesuai: ${filteredData.filter(d => d.manualStatus === 'VALID').length}`, 14, 52);
+    doc.text(`✗ Tidak Sesuai: ${filteredData.filter(d => d.manualStatus === 'INVALID').length}`, 14, 59);
+    doc.text(`⏳ Belum Validasi: ${filteredData.filter(d => d.manualStatus === 'UNCHECKED').length}`, 14, 66);
 
     // Tabel
     autoTable(doc, {
-      startY: 80,
-      head: [['No', 'ID Scan', 'Nomor Container', 'Status Format', 'Status Validasi', 'Waktu Scan']],
+      startY: 75,
+      head: [['No', 'ID Scan', 'Nomor Container', 'Status Validasi', 'Waktu Scan']],
       body: filteredData.map((item, i) => [
         i + 1,
         item.id_scan || '-',
         item.container_no || '-',
-        item.formatValid ? 'VALID' : 'INVALID',
-        item.manualStatus === 'VALID' ? 'SESUAI' : 
-        item.manualStatus === 'INVALID' ? 'TIDAK SESUAI' : 'BELUM',
+        item.manualStatus === 'VALID' ? '✓ SESUAI' : 
+        item.manualStatus === 'INVALID' ? '✗ TIDAK SESUAI' : '⏳ BELUM',
         dayjs(item.scan_time).format('DD/MM/YYYY HH:mm')
       ]),
       styles: { fontSize: 8 },
       headStyles: { fillColor: [0, 21, 41], textColor: 255 },
       columnStyles: {
-        4: { 
+        3: { 
           cellWidth: 30,
           halign: 'center',
           cellCallback: (cell, data) => {
-            if (cell.raw === 'SESUAI') cell.styles.fillColor = [230, 255, 230];
-            if (cell.raw === 'TIDAK SESUAI') cell.styles.fillColor = [255, 230, 230];
+            if (cell.raw === '✓ SESUAI') cell.styles.fillColor = [230, 255, 230];
+            if (cell.raw === '✗ TIDAK SESUAI') cell.styles.fillColor = [255, 230, 230];
           }
         }
       }
     });
 
-    doc.save(`Validasi_Manual_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
+    doc.save(`Validasi_Container_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
     messageApi.success('PDF berhasil didownload');
   };
 
@@ -273,17 +236,7 @@ const ContainerValidation = () => {
       render: (_, __, i) => i + 1
     },
     {
-      title: 'Status Format',
-      key: 'formatStatus',
-      width: 100,
-      render: (_, record) => (
-        record.formatValid 
-          ? <Tag icon={<CheckCircleOutlined />} color="success">FORMAT VALID</Tag>
-          : <Tag icon={<CloseCircleOutlined />} color="error">FORMAT INVALID</Tag>
-      )
-    },
-    {
-      title: 'Validasi Manual',
+      title: 'Status Validasi',
       key: 'manualStatus',
       width: 120,
       render: (_, record) => {
@@ -299,13 +252,13 @@ const ContainerValidation = () => {
     {
       title: 'ID Scan',
       dataIndex: 'id_scan',
-      width: 180,
+      width: 200,
       ellipsis: true
     },
     {
       title: 'Nomor Container',
       dataIndex: 'container_no',
-      width: 150,
+      width: 180,
       render: (text, record) => (
         <Text style={{ 
           color: record.manualStatus === 'VALID' ? '#52c41a' : 
@@ -320,12 +273,12 @@ const ContainerValidation = () => {
       title: 'Waktu Scan',
       dataIndex: 'scan_time',
       width: 150,
-      render: t => dayjs(t).format('DD/MM/YYYY HH:mm')
+      render: t => dayjs(t).format('DD/MM/YYYY HH:mm:ss')
     },
     {
       title: 'Gambar',
       key: 'images',
-      width: 60,
+      width: 70,
       align: 'center',
       render: (_, record) => (
         <Badge count={record.images.length} color="#1890ff" showZero>
@@ -375,41 +328,43 @@ const ContainerValidation = () => {
         </Text>
       </div>
 
-      {/* Statistik */}
+      {/* Statistik - HANYA 3 KATEGORI */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-        <Col span={4}>
+        <Col span={6}>
           <Card>
             <Statistic title="Total Scan" value={stats.total} />
           </Card>
         </Col>
-        <Col span={4}>
-          <Card>
-            <Statistic title="Format Valid" value={stats.formatValid} valueStyle={{ color: '#52c41a' }} />
-          </Card>
-        </Col>
-        <Col span={4}>
-          <Card>
-            <Statistic title="Format Invalid" value={stats.formatInvalid} valueStyle={{ color: '#ff4d4f' }} />
-          </Card>
-        </Col>
-        <Col span={4}>
+        <Col span={6}>
           <Card style={{ background: '#f6ffed' }}>
-            <Statistic title="✓ Sesuai" value={stats.validManual} valueStyle={{ color: '#52c41a' }} />
+            <Statistic 
+              title="✓ Sesuai" 
+              value={stats.valid} 
+              valueStyle={{ color: '#52c41a' }}
+            />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={6}>
           <Card style={{ background: '#fff1f0' }}>
-            <Statistic title="✗ Tidak Sesuai" value={stats.invalidManual} valueStyle={{ color: '#ff4d4f' }} />
+            <Statistic 
+              title="✗ Tidak Sesuai" 
+              value={stats.invalid} 
+              valueStyle={{ color: '#ff4d4f' }}
+            />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={6}>
           <Card style={{ background: '#e6f7ff' }}>
-            <Statistic title="⏳ Belum" value={stats.unchecked} valueStyle={{ color: '#1890ff' }} />
+            <Statistic 
+              title="⏳ Belum" 
+              value={stats.unchecked} 
+              valueStyle={{ color: '#1890ff' }}
+            />
           </Card>
         </Col>
       </Row>
 
-      {/* Filter */}
+      {/* Filter - HANYA 3 FILTER */}
       <Card style={{ marginBottom: 16 }}>
         <Row gutter={16} align="middle">
           <Col span={6}>
@@ -426,17 +381,15 @@ const ContainerValidation = () => {
               value={selectedStatus}
               onChange={setSelectedStatus}
             >
-              <Option value="all">Semua Data</Option>
-              <Option value="format_valid">Format Valid</Option>
-              <Option value="format_invalid">Format Invalid</Option>
-              <Option value="manual_valid">✓ Sesuai</Option>
-              <Option value="manual_invalid">✗ Tidak Sesuai</Option>
+              <Option value="all">📋 Semua Data</Option>
+              <Option value="valid">✓ Sesuai</Option>
+              <Option value="invalid">✗ Tidak Sesuai</Option>
               <Option value="unchecked">⏳ Belum</Option>
             </Select>
           </Col>
           <Col span={6}>
             <Input
-              placeholder="Cari container..."
+              placeholder="Cari container / ID scan..."
               prefix={<SearchOutlined />}
               value={searchText}
               onChange={e => setSearchText(e.target.value)}
@@ -506,19 +459,11 @@ const ContainerValidation = () => {
             />
 
             <Row gutter={16} style={{ marginBottom: 16 }}>
-              <Col span={12}>
-                <Card size="small" title="Nomor di Database">
+              <Col span={24}>
+                <Card size="small" title="Nomor Container (Database)">
                   <Text strong style={{ fontSize: 24, color: '#1890ff' }}>
                     {selectedRecord.container_no || '-'}
                   </Text>
-                </Card>
-              </Col>
-              <Col span={12}>
-                <Card size="small" title="Status Format">
-                  {selectedRecord.formatValid 
-                    ? <Tag color="success">FORMAT VALID</Tag>
-                    : <Tag color="error">FORMAT INVALID</Tag>
-                  }
                 </Card>
               </Col>
             </Row>
