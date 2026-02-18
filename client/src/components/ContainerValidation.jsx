@@ -44,6 +44,19 @@ const { Option } = Select;
 const API_BASE = 'http://localhost:5000';
 
 // ============================================================
+// VALIDASI FORMAT CONTAINER (4 HURUF + 7 ANGKA)
+// ============================================================
+const isValidFormat = (containerNo) => {
+  if (!containerNo) return false;
+  
+  // Pattern: 4 huruf + 7 angka (contoh: EMCU8485224)
+  const pattern = /^[A-Z]{4}\d{7}$/;
+  const trimmed = containerNo.trim().toUpperCase();
+  
+  return pattern.test(trimmed);
+};
+
+// ============================================================
 // Main Component
 // ============================================================
 const ContainerValidation = () => {
@@ -59,9 +72,9 @@ const ContainerValidation = () => {
 
   const [stats, setStats] = useState({
     total: 0,
-    valid: 0,      // SESUAI
-    invalid: 0,     // TIDAK SESUAI
-    unchecked: 0    // BELUM
+    valid: 0,      // SESUAI (setelah dicek manual)
+    invalid: 0,     // TIDAK SESUAI (termasuk format salah + N/A + Failed)
+    unchecked: 0    // BELUM (hanya yang format benar)
   });
 
   // ============================================================
@@ -84,10 +97,27 @@ const ContainerValidation = () => {
           item.image7_path, item.image8_path
         ].filter(Boolean);
 
+        // CEK FORMAT
+        const formatValid = isValidFormat(item.container_no);
+        
+        // Tentukan status manual
+        let manualStatus = item.manual_status || 'UNCHECKED';
+        
+        // ============================================================
+        // LOGIKA UTAMA:
+        // 1. Jika format TIDAK valid (bukan 4 huruf 7 angka) -> LANGSUNG MERAH
+        // 2. Jika format valid -> BISA dicek manual (BIRU)
+        // ============================================================
+        if (!formatValid) {
+          manualStatus = 'INVALID';  // Langsung merah tanpa perlu validasi
+        }
+
         return {
           ...item,
           images,
-          manualStatus: item.manual_status || 'UNCHECKED' // 'VALID', 'INVALID', 'UNCHECKED'
+          formatValid,
+          manualStatus,
+          isAutoInvalid: !formatValid // Otomatis merah karena format salah
         };
       });
 
@@ -133,9 +163,14 @@ const ContainerValidation = () => {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // ============================================================
-  // Buka modal validasi
+  // Buka modal validasi (HANYA UNTUK FORMAT VALID)
   // ============================================================
   const openValidationModal = (record) => {
+    // Cegah buka modal untuk yang formatnya salah
+    if (!record.formatValid) {
+      messageApi.info('Data dengan format tidak valid otomatis TIDAK SESUAI');
+      return;
+    }
     setSelectedRecord(record);
     setValidationModalVisible(true);
   };
@@ -244,9 +279,21 @@ const ContainerValidation = () => {
           return <Tag icon={<CheckCircleOutlined />} color="success">✓ SESUAI</Tag>;
         }
         if (record.manualStatus === 'INVALID') {
+          // Tooltip berbeda untuk yang format salah vs manual invalid
+          if (record.isAutoInvalid) {
+            return (
+              <Tooltip title="Format tidak valid (bukan 4 huruf + 7 angka)">
+                <Tag icon={<CloseCircleOutlined />} color="error">✗ FORMAT SALAH</Tag>
+              </Tooltip>
+            );
+          }
           return <Tag icon={<CloseCircleOutlined />} color="error">✗ TIDAK SESUAI</Tag>;
         }
-        return <Tag color="default">⏳ BELUM</Tag>;
+        return (
+          <Tooltip title="Format benar, perlu dicek manual">
+            <Tag color="default">⏳ CEK GAMBAR</Tag>
+          </Tooltip>
+        );
       }
     },
     {
@@ -259,15 +306,29 @@ const ContainerValidation = () => {
       title: 'Nomor Container',
       dataIndex: 'container_no',
       width: 180,
-      render: (text, record) => (
-        <Text style={{ 
-          color: record.manualStatus === 'VALID' ? '#52c41a' : 
-                 record.manualStatus === 'INVALID' ? '#ff4d4f' : 'inherit',
-          fontWeight: 'bold'
-        }}>
-          {text || '-'}
-        </Text>
-      )
+      render: (text, record) => {
+        // Cek apakah format valid
+        const formatValid = isValidFormat(text);
+        
+        return (
+          <div>
+            <Text style={{ 
+              color: record.manualStatus === 'VALID' ? '#52c41a' : 
+                     record.manualStatus === 'INVALID' ? '#ff4d4f' : 'inherit',
+              fontWeight: 'bold'
+            }}>
+              {text || '-'}
+            </Text>
+            {!formatValid && (
+              <div>
+                <Text type="danger" style={{ fontSize: 10 }}>
+                  ⚠️ Bukan format container
+                </Text>
+              </div>
+            )}
+          </div>
+        );
+      }
     },
     {
       title: 'Waktu Scan',
@@ -291,17 +352,23 @@ const ContainerValidation = () => {
       key: 'action',
       width: 100,
       fixed: 'right',
-      render: (_, record) => (
-        <Button
-          type="primary"
-          size="small"
-          icon={<ScanOutlined />}
-          onClick={() => openValidationModal(record)}
-          disabled={!record.images || record.images.length === 0}
-        >
-          Validasi
-        </Button>
-      )
+      render: (_, record) => {
+        // Tombol validasi hanya untuk yang format valid
+        const canValidate = record.formatValid && record.manualStatus !== 'VALID' && record.manualStatus !== 'INVALID';
+        
+        return (
+          <Button
+            type="primary"
+            size="small"
+            icon={<ScanOutlined />}
+            onClick={() => openValidationModal(record)}
+            disabled={!record.images?.length || !canValidate}
+            style={!canValidate ? { background: '#d9d9d9', borderColor: '#d9d9d9' } : {}}
+          >
+            {record.formatValid ? 'Validasi' : 'Format Salah'}
+          </Button>
+        );
+      }
     }
   ];
 
@@ -321,14 +388,15 @@ const ContainerValidation = () => {
       }}>
         <Title level={3} style={{ color: 'white', margin: 0 }}>
           <SafetyCertificateOutlined style={{ marginRight: 12 }} />
-          Validasi Manual Container
+          Validasi Container
         </Title>
         <Text style={{ color: 'rgba(255,255,255,0.7)' }}>
-          Lihat gambar dan tandai apakah nomor container SESUAI atau TIDAK SESUAI
+          • Format SALAH (bukan 4 huruf + 7 angka) → Otomatis MERAH
+          • Format BENAR → Bisa dicek manual (SESUAI / TIDAK SESUAI)
         </Text>
       </div>
 
-      {/* Statistik - HANYA 3 KATEGORI */}
+      {/* Statistik */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col span={6}>
           <Card>
@@ -356,7 +424,7 @@ const ContainerValidation = () => {
         <Col span={6}>
           <Card style={{ background: '#e6f7ff' }}>
             <Statistic 
-              title="⏳ Belum" 
+              title="⏳ Perlu Cek" 
               value={stats.unchecked} 
               valueStyle={{ color: '#1890ff' }}
             />
@@ -364,7 +432,7 @@ const ContainerValidation = () => {
         </Col>
       </Row>
 
-      {/* Filter - HANYA 3 FILTER */}
+      {/* Filter */}
       <Card style={{ marginBottom: 16 }}>
         <Row gutter={16} align="middle">
           <Col span={6}>
@@ -384,7 +452,7 @@ const ContainerValidation = () => {
               <Option value="all">📋 Semua Data</Option>
               <Option value="valid">✓ Sesuai</Option>
               <Option value="invalid">✗ Tidak Sesuai</Option>
-              <Option value="unchecked">⏳ Belum</Option>
+              <Option value="unchecked">⏳ Perlu Cek</Option>
             </Select>
           </Col>
           <Col span={6}>
@@ -418,6 +486,22 @@ const ContainerValidation = () => {
         </Row>
       </Card>
 
+      {/* Info Alert */}
+      <Alert
+        message="LOGIKA VALIDASI"
+        description={
+          <div>
+            <p><Tag color="error">✗ FORMAT SALAH</Tag> → Otomatis MERAH (N/A, Failed, atau bukan 4 huruf + 7 angka)</p>
+            <p><Tag color="default">⏳ CEK GAMBAR</Tag> → Format BENAR (4 huruf + 7 angka), perlu dicecokkan dengan gambar</p>
+            <p><Tag color="success">✓ SESUAI</Tag> → Setelah dicek, nomor cocok dengan gambar</p>
+            <p><Tag color="error">✗ TIDAK SESUAI</Tag> → Setelah dicek, nomor TIDAK cocok dengan gambar</p>
+          </div>
+        }
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+      />
+
       {/* Tabel */}
       <Card>
         <Table
@@ -425,7 +509,7 @@ const ContainerValidation = () => {
           dataSource={filteredData}
           rowKey="id"
           loading={loading}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1300 }}
           pagination={{ pageSize: 20 }}
           rowClassName={record => {
             if (record.manualStatus === 'VALID') return 'row-valid';
@@ -435,7 +519,7 @@ const ContainerValidation = () => {
         />
       </Card>
 
-      {/* Modal Validasi */}
+      {/* Modal Validasi (HANYA UNTUK FORMAT VALID) */}
       <Modal
         title={
           <Space>
@@ -464,6 +548,9 @@ const ContainerValidation = () => {
                   <Text strong style={{ fontSize: 24, color: '#1890ff' }}>
                     {selectedRecord.container_no || '-'}
                   </Text>
+                  {selectedRecord.formatValid && (
+                    <Tag color="green" style={{ marginLeft: 8 }}>Format Valid</Tag>
+                  )}
                 </Card>
               </Col>
             </Row>
